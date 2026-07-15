@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-otel-plugin"
+version = "1.0.0"
+description = "OpenTelemetry (OTLP) observability plugin for the Hermes agent — GenAI-convention spans, dashboard-shaped log records, and local-model cost estimation."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Kshitij Thakkar", email = "sunnyg50@gmail.com" }]
+requires-python = ">=3.10"
+keywords = ["hermes", "opentelemetry", "otlp", "observability", "genai", "agent"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Monitoring",
+]
+dependencies = [
+    "opentelemetry-api>=1.20",
+    "opentelemetry-sdk>=1.20",
+    "opentelemetry-exporter-otlp-proto-http>=1.20",
+]
+
+[project.optional-dependencies]
+# Unlocks on-prem GPU/energy/CO2 metrics + inline eval — see ADVANCED.md.
+genai = ["genai-otel-instrument"]
+dev = ["pytest>=7", "pyyaml", "ruff"]
+
+# Hermes discovers pip-installed plugins through this entry-point group;
+# the module it names must expose register(ctx).
+[project.entry-points."hermes_agent.plugins"]
+otel = "hermes_otel"
+
+[project.urls]
+Homepage = "https://github.com/Mandark-droid/hermes-otel-plugin"
+Issues = "https://github.com/Mandark-droid/hermes-otel-plugin/issues"
+
+# The plugin is laid out flat at the repo root so that
+# `hermes plugins install Mandark-droid/hermes-otel-plugin` (which expects
+# plugin.yaml + __init__.py at the clone root) works unchanged. For pip,
+# the root maps to the `hermes_otel` package.
+[tool.setuptools]
+packages = ["hermes_otel"]
+package-dir = { "hermes_otel" = "." }
+
+[tool.setuptools.package-data]
+hermes_otel = ["plugin.yaml", "README.md", "ADVANCED.md"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
