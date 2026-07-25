@@ -16,19 +16,6 @@ from pathlib import Path
 
 import pytest
 import yaml
-from opentelemetry._logs import get_logger
-from opentelemetry.sdk._logs import LoggerProvider
-from opentelemetry.sdk._logs.export import (
-    InMemoryLogRecordExporter,
-    SimpleLogRecordProcessor,
-)
-from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
-    InMemorySpanExporter,
-)
-
 from hermes_otel.cost import (
     estimate_cost_usd,
     extract_param_count_billions,
@@ -45,6 +32,18 @@ from hermes_otel.log_emitter import (
     EVENT_TOOL_RESULT,
     EVENT_USER_PROMPT,
     OtelLogEmitter,
+)
+from opentelemetry._logs import get_logger
+from opentelemetry.sdk._logs import LoggerProvider
+from opentelemetry.sdk._logs.export import (
+    InMemoryLogRecordExporter,
+    SimpleLogRecordProcessor,
+)
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+    InMemorySpanExporter,
 )
 
 # Standalone layout: the repo root IS the plugin directory (plugin.yaml +
@@ -573,7 +572,7 @@ class TestPluginAdapter:
         as ``gen_ai.prompt``, which the log-record-based dashboard never sees.
         """
         monkeypatch.setenv("HERMES_OTEL_CAPTURE_CONTENT", "true")
-        exporter, tracer = exporter_and_tracer
+        _exporter, tracer = exporter_and_tracer
         plugin, provider = _fresh_plugin()
         monkeypatch.setattr(provider, "build_tracer", lambda **_: tracer)
         log_exporter, otel_logger = _in_memory_logger()

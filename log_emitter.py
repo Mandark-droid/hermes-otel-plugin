@@ -41,7 +41,8 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Mapping, Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -242,7 +243,7 @@ class OtelLogEmitter:
             "cost_usd": _as_float(cost_usd),
         }
         if finish_reasons:
-            attrs["finish_reason"] = list(finish_reasons)[0]
+            attrs["finish_reason"] = next(iter(finish_reasons))
         ttft = _as_float(ttft_ms)
         if ttft is not None:
             attrs["ttft_ms"] = ttft

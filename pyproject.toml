@@ -56,5 +56,19 @@ hermes_otel = ["plugin.yaml", "README.md", "ADVANCED.md"]
 line-length = 100
 target-version = "py310"
 
+[tool.ruff.lint]
+ignore = [
+    # Fail-open is the observability contract: every hook catches broad
+    # Exception (and some flush/shutdown paths swallow silently) so that
+    # telemetry can never break the agent. See __init__.py module docstring.
+    "BLE001",
+    "S110",
+    # The repo root IS the plugin directory and keeps the upstream
+    # `hermes plugins install owner/repo` layout, so the distribution name
+    # (hermes-otel-plugin) is hyphenated by design; pip imports it as the
+    # valid module name `hermes_otel` (see [tool.setuptools].package-dir).
+    "N999",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

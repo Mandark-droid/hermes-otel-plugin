@@ -24,7 +24,6 @@ the library returns ``0.0``/unknown).
 from __future__ import annotations
 
 import re
-from typing import Optional
 
 # Per-1,000-token prices by parameter-count tier — verbatim from
 # genai_otel.cost_calculator._get_local_model_price_tier. (prompt, completion)
@@ -53,7 +52,7 @@ _HF_SIZE_MAP = {
 _PARAM_RE = re.compile(r"(\d+(?:\.\d+)?)(m|b)(?:\s|:|$|-)")
 
 
-def extract_param_count_billions(model: str) -> Optional[float]:
+def extract_param_count_billions(model: str) -> float | None:
     """Return the model's parameter count in billions, or ``None`` if unknown.
 
     ``llama3.1:8b`` → 8.0 · ``qwen3:0.6b`` → 0.6 · ``smollm2:360m`` → 0.36.
@@ -80,10 +79,10 @@ def _price_tier(param_billions: float) -> tuple[float, float]:
 
 
 def estimate_cost_usd(
-    model: Optional[str],
-    input_tokens: Optional[int],
-    output_tokens: Optional[int],
-) -> Optional[float]:
+    model: str | None,
+    input_tokens: int | None,
+    output_tokens: int | None,
+) -> float | None:
     """Estimate USD cost for a local model call from its size + token usage.
 
     Returns ``None`` when the model size can't be inferred or there are no

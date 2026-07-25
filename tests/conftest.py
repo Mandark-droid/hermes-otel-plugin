@@ -18,7 +18,7 @@ _PKG = "hermes_otel"
 
 
 class _RootPackageFinder:
-    def find_spec(self, fullname, path=None, target=None):  # noqa: ARG002
+    def find_spec(self, fullname, path=None, target=None):
         if fullname == _PKG:
             return importlib.util.spec_from_file_location(
                 fullname,

@@ -166,10 +166,7 @@ def _build_plain_otel(*, service_name: str, otlp_endpoint: str) -> Any:
         )
         return active.get_tracer(INSTRUMENTATION_SCOPE)
     except Exception:
-        logger.error(
-            "failed to configure OTel SDK tracer; observability disabled",
-            exc_info=True,
-        )
+        logger.exception("failed to configure OTel SDK tracer; observability disabled")
         return _noop_tracer()
 
 

@@ -38,7 +38,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -46,12 +46,12 @@ logger = logging.getLogger(__name__)
 # hook call without re-importing the SDK. Mirrors the langfuse/nemo_relay gate.
 _INIT_FAILED = object()
 _LOCK = threading.RLock()
-_EMITTER: "Any | object | None" = None
+_EMITTER: Any | object | None = None
 
 # Parallel OTel *log-record* emitter (populates the agent-coding dashboard,
 # which is built from log events, not spans). Built once alongside the span
 # emitter; may be a no-op emitter when the logs SDK/endpoint is unavailable.
-_LOG_EMITTER: "Any | object | None" = None
+_LOG_EMITTER: Any | object | None = None
 
 # One open invoke_agent context per active session, keyed by session id.
 _OPEN_TURNS_LOCK = threading.Lock()
@@ -74,7 +74,7 @@ def _env_bool(name: str) -> bool:
     return _env(name).lower() in {"1", "true", "yes", "on"}
 
 
-def _get_emitter() -> Optional[Any]:
+def _get_emitter() -> Any | None:
     """Return a cached :class:`OtelGenAIEmitter`, or ``None`` if unavailable.
 
     Activation of this plugin is controlled by the Hermes plugin system — this
@@ -147,7 +147,7 @@ def _get_emitter() -> Optional[Any]:
         return _EMITTER
 
 
-def _get_log_emitter() -> Optional[Any]:
+def _get_log_emitter() -> Any | None:
     """Return the cached dashboard log emitter (or ``None``).
 
     Ensures the span emitter (and thus the log emitter) is built first; the log
