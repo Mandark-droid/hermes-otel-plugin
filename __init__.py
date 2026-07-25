@@ -371,18 +371,22 @@ def on_post_api_request(**kwargs: Any) -> None:
     try:
         usage = kwargs.get("usage")
         duration = kwargs.get("api_duration") or kwargs.get("duration_ms")
-        ttft_ms = None
+        call_duration_ms = None
         if duration is not None:
             try:
                 # api_duration is seconds (langfuse rounds it as such); a
                 # duration_ms is already ms. Normalise api_duration to ms.
-                ttft_ms = (
+                call_duration_ms = (
                     float(duration) * 1000.0
                     if kwargs.get("api_duration") is not None
                     else float(duration)
                 )
             except (TypeError, ValueError):
-                ttft_ms = None
+                call_duration_ms = None
+        # The same measured wall-clock value serves two purposes: it backdates
+        # the chat span start (real span duration in waterfalls) and fills the
+        # shared TTFT field (for non-streaming calls TTFT == full latency).
+        ttft_ms = call_duration_ms
         input_tokens = _usage_field(usage, "input_tokens", "prompt_tokens")
         output_tokens = _usage_field(usage, "output_tokens", "completion_tokens")
         cost_usd = kwargs.get("cost_usd") or kwargs.get("cost")
@@ -409,6 +413,7 @@ def on_post_api_request(**kwargs: Any) -> None:
             cost_usd=cost_usd,
             finish_reasons=finish,
             ttft_ms=ttft_ms,
+            duration_ms=call_duration_ms,
             response_text=kwargs.get("assistant_response"),
         )
     except Exception:
@@ -451,6 +456,7 @@ def on_post_tool_call(**kwargs: Any) -> None:
             arguments=kwargs.get("args"),
             result=kwargs.get("result"),
             error=error,
+            duration_ms=kwargs.get("duration_ms"),
         )
     except Exception:
         logger.debug("on_post_tool_call: failed to emit execute_tool span", exc_info=True)

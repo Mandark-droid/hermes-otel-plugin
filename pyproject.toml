@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-otel-plugin"
-version = "1.0.0"
+version = "1.1.0"
 description = "OpenTelemetry (OTLP) observability plugin for the Hermes agent — GenAI-convention spans, dashboard-shaped log records, and local-model cost estimation."
 readme = "README.md"
 license = { text = "MIT" }

@@ -226,6 +226,39 @@ class TestEmitter:
         assert spans[OP_INVOKE_AGENT].attributes["gen_ai.prompt"] == "hello"
         assert spans[OP_CHAT].attributes["gen_ai.completion"] == "world"
 
+    def test_chat_span_backdated_by_measured_duration(self, exporter_and_tracer):
+        """Post-hoc spans carry the measured call duration, not ~0."""
+        exporter, tracer = exporter_and_tracer
+        emitter = OtelGenAIEmitter(tracer)
+
+        emitter.record_llm_call(request_model="m", duration_ms=2500.0)
+
+        span = _by_name(exporter.get_finished_spans())[OP_CHAT]
+        duration_ms = (span.end_time - span.start_time) / 1e6
+        assert duration_ms == pytest.approx(2500.0, abs=250.0)
+
+    def test_tool_span_backdated_by_measured_duration(self, exporter_and_tracer):
+        exporter, tracer = exporter_and_tracer
+        emitter = OtelGenAIEmitter(tracer)
+
+        emitter.record_tool_call(tool_name="terminal", duration_ms=1200)
+
+        span = _by_name(exporter.get_finished_spans())[OP_EXECUTE_TOOL]
+        duration_ms = (span.end_time - span.start_time) / 1e6
+        assert duration_ms == pytest.approx(1200.0, abs=250.0)
+
+    def test_missing_or_bad_duration_starts_now(self, exporter_and_tracer):
+        """No / unusable duration falls back to the OTel default (start now)."""
+        exporter, tracer = exporter_and_tracer
+        emitter = OtelGenAIEmitter(tracer)
+
+        emitter.record_llm_call(request_model="m")  # absent
+        emitter.record_tool_call(tool_name="t1", duration_ms="garbage")
+        emitter.record_tool_call(tool_name="t2", duration_ms=-50)
+
+        for span in exporter.get_finished_spans():
+            assert (span.end_time - span.start_time) / 1e6 < 1000.0
+
 
 # ---------------------------------------------------------------------------
 # Cost estimator: local-model size → price-tier, mirrors genai-otel-instrument.
@@ -693,3 +726,37 @@ class TestPluginAdapter:
 
         spans = _by_name(exporter.get_finished_spans())
         assert spans[OP_EXECUTE_TOOL].attributes["error.type"] == "error"
+
+    def test_post_hooks_backdate_spans_with_measured_duration(
+        self, exporter_and_tracer, monkeypatch
+    ):
+        """Hermes measures each call's wall-clock time (``api_duration`` in
+        seconds on ``post_api_request``, ``duration_ms`` on ``post_tool_call``)
+        — the spans must cover that window instead of being zero-length."""
+        exporter, tracer = exporter_and_tracer
+        plugin, provider = _fresh_plugin()
+        monkeypatch.setattr(provider, "build_tracer", lambda **_: tracer)
+        _log_exporter, otel_logger = _in_memory_logger()
+        monkeypatch.setattr(provider, "build_logger", lambda **_: otel_logger)
+        ctx = _FakeCtx()
+        plugin.register(ctx)
+
+        ctx.hooks["post_api_request"](
+            session_id="s",
+            model="m",
+            usage={"input_tokens": 1, "output_tokens": 1},
+            api_duration=2.0,  # seconds — the langfuse-style field
+        )
+        ctx.hooks["post_tool_call"](tool_name="terminal", duration_ms=1500)
+
+        spans = _by_name(exporter.get_finished_spans())
+        chat_ms = (spans[OP_CHAT].end_time - spans[OP_CHAT].start_time) / 1e6
+        tool_ms = (
+            spans[OP_EXECUTE_TOOL].end_time - spans[OP_EXECUTE_TOOL].start_time
+        ) / 1e6
+        assert chat_ms == pytest.approx(2000.0, abs=250.0)
+        assert tool_ms == pytest.approx(1500.0, abs=250.0)
+        # The shared TTFT field still carries the same measured value.
+        assert spans[OP_CHAT].attributes[
+            "copilot_chat.time_to_first_token"
+        ] == pytest.approx(2000.0)

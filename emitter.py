@@ -20,6 +20,11 @@ Span model:
       |
       +-- execute_tool   one span per tool call   (tool name, type)
 
+``invoke_agent`` wraps the turn live (context manager). ``chat`` and
+``execute_tool`` are emitted from Hermes's *post*-event hooks, which carry the
+measured wall-clock duration — each span is backdated by that duration so all
+three span types carry real durations in the waterfall.
+
 GenAI attribute conventions emitted (the names the OTel GenAI spec defines):
 
     gen_ai.operation.name            invoke_agent | chat | execute_tool
@@ -43,6 +48,7 @@ Extras (interoperable, safe no-ops on any conventions-aware backend):
 from __future__ import annotations
 
 import logging
+import time
 from contextlib import contextmanager
 from typing import Any, Iterator, Mapping, Sequence
 
@@ -153,6 +159,7 @@ class OtelGenAIEmitter:
         cost_usd: float | None = None,
         finish_reasons: Sequence[str] | None = None,
         ttft_ms: float | None = None,
+        duration_ms: float | None = None,
         response_text: str | None = None,
         extra: Mapping[str, Any] | None = None,
     ) -> None:
@@ -160,8 +167,15 @@ class OtelGenAIEmitter:
 
         Nested under the active ``invoke_agent`` span when called inside
         :meth:`turn_span`. Carries tokens, cost, finish reason, and TTFT.
+
+        Hermes hooks fire *after* the API call completes, so the span is
+        backdated by ``duration_ms`` (the wall-clock time Hermes measured for
+        the call) — the span then covers the real call window instead of
+        rendering as a zero-length tick in trace waterfalls.
         """
-        with self._tracer.start_as_current_span(OP_CHAT) as span:
+        with self._tracer.start_as_current_span(
+            OP_CHAT, start_time=_backdated_start(duration_ms)
+        ) as span:
             span.set_attribute("gen_ai.operation.name", OP_CHAT)
             span.set_attribute("gen_ai.system", GEN_AI_SYSTEM)
             _set_if(span, "gen_ai.request.model", request_model)
@@ -191,14 +205,20 @@ class OtelGenAIEmitter:
         arguments: Mapping[str, Any] | None = None,
         result: Any = None,
         error: BaseException | str | None = None,
+        duration_ms: float | None = None,
         extra: Mapping[str, Any] | None = None,
     ) -> None:
         """Emit one ``execute_tool`` span for a single tool call.
 
         ``gen_ai.tool.name`` drives a per-session tool breakdown. Errors are
         recorded on the span (not swallowed) so failed tool calls are visible.
+        Backdated by ``duration_ms`` (Hermes's measured wall-clock time for the
+        tool run) so the span covers the real execution window — see
+        :meth:`record_llm_call`.
         """
-        with self._tracer.start_as_current_span(OP_EXECUTE_TOOL) as span:
+        with self._tracer.start_as_current_span(
+            OP_EXECUTE_TOOL, start_time=_backdated_start(duration_ms)
+        ) as span:
             span.set_attribute("gen_ai.operation.name", OP_EXECUTE_TOOL)
             span.set_attribute("gen_ai.system", GEN_AI_SYSTEM)
             span.set_attribute("gen_ai.tool.name", tool_name)
@@ -235,6 +255,24 @@ class OtelGenAIEmitter:
                 _set_if(span, key, value)
             except Exception:  # pragma: no cover - defensive
                 logger.warning("dropping un-settable span attribute %s", key)
+
+
+def _backdated_start(duration_ms: Any) -> int | None:
+    """Span start time (epoch ns) for an event that already finished.
+
+    Hermes's per-call hooks (``post_api_request`` / ``post_tool_call``) fire
+    after the LLM/tool call completes and carry the measured wall-clock
+    duration. Starting the span ``duration_ms`` in the past — and letting it
+    end now — makes the span cover the real call window, so waterfalls show
+    true durations instead of zero-length ticks at the completion instant.
+
+    Returns ``None`` (meaning "start now", the OTel default) when the duration
+    is missing or unusable, so callers can pass it through unconditionally.
+    """
+    ms = _as_float(duration_ms)
+    if ms is None or ms <= 0:
+        return None
+    return time.time_ns() - int(ms * 1_000_000)
 
 
 def _as_int(value: Any) -> int | None:
