@@ -1,0 +1,28 @@
+# hermes-otel-plugin
+
+> OpenTelemetry (OTLP) observability plugin for the NousResearch Hermes agent.
+> Exports each Hermes turn as GenAI-convention spans (invoke_agent → chat /
+> execute_tool, with real measured durations, tokens, cost, TTFT) plus
+> dashboard-shaped OTLP log records (user_prompt / session_start /
+> api_response / tool_result). Works with any OTLP backend: OpenTelemetry
+> Collector, Jaeger, Grafana Tempo, Honeycomb. Fail-open: without the OTel SDK
+> every hook no-ops. Content capture (prompts/responses/tool I/O) is opt-in via
+> HERMES_OTEL_CAPTURE_CONTENT, off by default.
+
+Install: `hermes plugins install Mandark-droid/hermes-otel-plugin` then
+`hermes plugins enable otel`. The only hard runtime dependency is
+`pip install opentelemetry-sdk opentelemetry-exporter-otlp-proto-http`.
+Default endpoint http://localhost:4318 (override: HERMES_OTEL_ENDPOINT).
+
+## Docs
+
+- [README](https://github.com/Mandark-droid/hermes-otel-plugin/blob/main/README.md): install paths, quickstart, config env vars, span model, AI-agent contract block
+- [ADVANCED](https://github.com/Mandark-droid/hermes-otel-plugin/blob/main/ADVANCED.md): genai-otel-instrument extras — GPU/energy/CO2 metrics + inline eval suite (PII, toxicity, bias, prompt-injection, hallucination)
+
+## Source (docstrings are the authoritative reference)
+
+- [__init__.py](https://github.com/Mandark-droid/hermes-otel-plugin/blob/main/__init__.py): register(ctx) + Hermes lifecycle hooks (the only Hermes-coupled module)
+- [emitter.py](https://github.com/Mandark-droid/hermes-otel-plugin/blob/main/emitter.py): GenAI span model — invoke_agent / chat / execute_tool attributes, duration backdating
+- [log_emitter.py](https://github.com/Mandark-droid/hermes-otel-plugin/blob/main/log_emitter.py): dashboard log-record field contract
+- [cost.py](https://github.com/Mandark-droid/hermes-otel-plugin/blob/main/cost.py): local-model cost estimation (model size → price tier)
+- [provider.py](https://github.com/Mandark-droid/hermes-otel-plugin/blob/main/provider.py): tracer/logger bootstrap (genai_otel preferred, plain OTel SDK fallback)
