@@ -213,7 +213,7 @@ guarantees:
 
 ```bash
 pip install opentelemetry-sdk opentelemetry-exporter-otlp-proto-http pytest pyyaml ruff
-pytest tests/ -v       # 43 tests, in-memory exporters, no network
+pytest tests/ -v       # 44 tests, in-memory exporters, no network
 ruff check .
 ```
 

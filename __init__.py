@@ -255,6 +255,7 @@ def _end_turn(**kwargs: Any) -> None:
         cm = _OPEN_TURNS.pop(session_id, None)
         _OPEN_TURN_SPANS.pop(session_id, None)
     _close_cm(cm)
+    _flush_turn()
 
 
 # on_session_end / on_session_finalize / on_session_reset all close the turn.
@@ -347,6 +348,7 @@ def on_transform_llm_output(**kwargs: Any) -> None:
     # End the turn span -> it exports immediately and the eval enricher runs on
     # this turn's prompt + response.
     _close_cm(cm)
+    _flush_turn()
 
 
 def _close_cm(cm: Any) -> None:
@@ -356,6 +358,24 @@ def _close_cm(cm: Any) -> None:
         cm.__exit__(None, None, None)
     except Exception:
         logger.debug("failed to close turn span", exc_info=True)
+
+
+def _flush_turn() -> None:
+    """Put the finished turn's spans + log records on the wire NOW.
+
+    Hermes's one-shot CLI (``hermes -z``) exits via ``os._exit()``, which
+    skips atexit and interpreter finalization — the batch processors never
+    get their shutdown flush, so any span still queued at exit is silently
+    lost (observed: ``invoke_agent`` and late-turn ``chat`` spans missing
+    from one-shot runs). Called after every turn close; bounded (3s max per
+    pipeline) and best-effort, never raises.
+    """
+    try:
+        from . import provider as _provider
+
+        _provider.flush_all()
+    except Exception:
+        logger.debug("turn-end flush failed", exc_info=True)
 
 
 def on_post_api_request(**kwargs: Any) -> None:

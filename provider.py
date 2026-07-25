@@ -32,6 +32,40 @@ DEFAULT_SERVICE_NAME = "agent.coding.hermes"
 DEFAULT_OTLP_ENDPOINT = "http://localhost:4318"
 INSTRUMENTATION_SCOPE = "hermes.observability.otel"
 
+# Providers this module built, kept for turn-end force_flush. Hermes's one-shot
+# CLI (`hermes -z`) exits via os._exit(), which skips atexit and interpreter
+# finalization — batch processors never get their shutdown flush there, so any
+# span/record still queued at exit is silently lost (observed: invoke_agent and
+# late-turn chat spans missing from one-shot runs). flush_all() at turn end
+# puts each turn's telemetry on the wire while the process is still alive.
+_TRACER_PROVIDER: Any | None = None
+_LOGGER_PROVIDER: Any | None = None
+
+
+def flush_all(timeout_millis: int = 3000) -> None:
+    """Best-effort, bounded force-flush of the span + log pipelines.
+
+    Called by the plugin at turn end (``transform_llm_output`` / session end).
+    Never raises; a down endpoint costs at most ``timeout_millis`` per
+    pipeline. On the genai_otel path the tracer provider is the SDK global.
+    """
+    tracer_provider = _TRACER_PROVIDER
+    if tracer_provider is None:
+        try:
+            from opentelemetry import trace
+
+            tracer_provider = trace.get_tracer_provider()
+        except Exception:  # pragma: no cover - defensive
+            tracer_provider = None
+    for provider in (tracer_provider, _LOGGER_PROVIDER):
+        flush = getattr(provider, "force_flush", None)
+        if flush is None:
+            continue
+        try:
+            flush(timeout_millis)
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("force_flush failed", exc_info=True)
+
 
 def build_tracer(
     *,
@@ -151,6 +185,8 @@ def _build_plain_otel(*, service_name: str, otlp_endpoint: str) -> Any:
             endpoint=otlp_endpoint.rstrip("/") + "/v1/traces"
         )
         provider.add_span_processor(BatchSpanProcessor(exporter))
+        global _TRACER_PROVIDER
+        _TRACER_PROVIDER = provider
         # Only set the global provider if one is not already configured, to
         # avoid clobbering a host application's tracing setup.
         current = trace.get_tracer_provider()
@@ -270,6 +306,8 @@ def build_logger(
         # OTLP HTTP logs endpoint convention is <endpoint>/v1/logs.
         exporter = OTLPLogExporter(endpoint=otlp_endpoint.rstrip("/") + "/v1/logs")
         provider.add_log_record_processor(BatchLogRecordProcessor(exporter))
+        global _LOGGER_PROVIDER
+        _LOGGER_PROVIDER = provider
         # Flush on interpreter exit. The span pipeline is flushed by Hermes'
         # shutdown path, but this LoggerProvider is ours alone — without an
         # explicit flush, late-turn records (api_response / tool_result emitted

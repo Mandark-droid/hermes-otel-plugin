@@ -759,3 +759,24 @@ class TestPluginAdapter:
         assert spans[OP_CHAT].attributes[
             "copilot_chat.time_to_first_token"
         ] == pytest.approx(2000.0)
+
+    def test_turn_end_force_flushes_pipelines(self, exporter_and_tracer, monkeypatch):
+        """``hermes -z`` exits via ``os._exit()`` (atexit is skipped), so the
+        turn-end flush is the only thing that puts late-turn spans on the wire
+        — without it the ``invoke_agent`` span and final ``chat`` spans of a
+        one-shot run are silently dropped from the batch queue."""
+        _exporter, tracer = exporter_and_tracer
+        plugin, provider = _fresh_plugin()
+        monkeypatch.setattr(provider, "build_tracer", lambda **_: tracer)
+        _log_exporter, otel_logger = _in_memory_logger()
+        monkeypatch.setattr(provider, "build_logger", lambda **_: otel_logger)
+        flushes: list[int] = []
+        monkeypatch.setattr(provider, "flush_all", lambda *a, **k: flushes.append(1))
+        ctx = _FakeCtx()
+        plugin.register(ctx)
+
+        ctx.hooks["pre_llm_call"](session_id="s", model="m", user_message="hi")
+        ctx.hooks["transform_llm_output"](session_id="s", response_text="done")
+        assert len(flushes) == 1  # turn close -> flush
+        ctx.hooks["on_session_end"](session_id="s")
+        assert len(flushes) == 2  # session end -> flush again

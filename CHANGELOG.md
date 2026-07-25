@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.1] - 2026-07-25
+
+### Fixed
+- **One-shot runs no longer lose spans.** Hermes's `-z` CLI exits via
+  `os._exit()`, which skips `atexit` and interpreter finalization — the batch
+  processors never got their shutdown flush, so the `invoke_agent` span and
+  any late-turn `chat`/`execute_tool` spans of a one-shot run were silently
+  dropped from the export queue (validated live against Hermes v0.19.0). The
+  plugin now force-flushes both pipelines at every turn close
+  (`transform_llm_output`) and session end — bounded at 3s per pipeline,
+  best-effort, fail-open.
+
 ## [1.1.0] - 2026-07-25
 
 ### Added
