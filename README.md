@@ -22,12 +22,12 @@ latency — so any conventions-aware backend can aggregate them:
   <img src="docs/img/hermes-jaeger-expanded.png" alt="A chat span expanded in Jaeger showing gen_ai.* attributes: request/response model, input/output tokens, cost_usd, time-to-first-token" width="100%">
 </p>
 
-<details>
-<summary><b>The same trace in Grafana</b> (Explore → Jaeger datasource) — any OTLP backend works</summary>
+The same trace in **Grafana** (Explore → Jaeger datasource) — any OTLP
+backend works:
+
 <p align="center">
   <img src="docs/img/hermes-grafana-trace.png" alt="The same Hermes trace rendered in Grafana Explore via the Jaeger datasource" width="100%">
 </p>
-</details>
 
 It exports Hermes's built-in observability events over OTLP in three
 complementary ways:
