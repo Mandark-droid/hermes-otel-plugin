@@ -13,6 +13,8 @@ Install: `hermes plugins install Mandark-droid/hermes-otel-plugin` then
 `hermes plugins enable otel`. The only hard runtime dependency is
 `pip install opentelemetry-sdk opentelemetry-exporter-otlp-proto-http`.
 Default endpoint http://localhost:4318 (override: HERMES_OTEL_ENDPOINT).
+Set HERMES_OTEL_LOGS_ENABLED=false to skip the dashboard log pipeline entirely
+(spans-only OTLP receivers without /v1/logs); spans are unaffected.
 
 ## Docs
 

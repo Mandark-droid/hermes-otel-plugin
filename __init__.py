@@ -117,26 +117,32 @@ def _get_emitter() -> Any | None:
             )
             # Build the parallel dashboard log emitter. Failure here must NOT
             # disable spans — log emission is best-effort; build_logger() returns
-            # None on any problem and OtelLogEmitter then no-ops.
+            # None on any problem and OtelLogEmitter then no-ops. An operator
+            # pointing the plugin at a spans-only OTLP receiver (one without
+            # /v1/logs) can set HERMES_OTEL_LOGS_ENABLED=false to skip the
+            # pipeline entirely: no provider, no exporter, no doomed POSTs.
             global _LOG_EMITTER
-            try:
-                otel_logger = build_logger(
-                    service_name=service_name,
-                    otlp_endpoint=otlp_endpoint,
-                    user_id=user_id,
-                )
-                _LOG_EMITTER = OtelLogEmitter(
-                    otel_logger,
-                    agent_name=agent_name,
-                    capture_content=capture,
-                )
-            except Exception:  # pragma: no cover - fail-open
-                logger.warning(
-                    "observability/otel: dashboard log emitter init failed; "
-                    "spans still emit",
-                    exc_info=True,
-                )
+            if _env("HERMES_OTEL_LOGS_ENABLED").lower() in {"0", "false", "no", "off"}:
                 _LOG_EMITTER = OtelLogEmitter(None)
+            else:
+                try:
+                    otel_logger = build_logger(
+                        service_name=service_name,
+                        otlp_endpoint=otlp_endpoint,
+                        user_id=user_id,
+                    )
+                    _LOG_EMITTER = OtelLogEmitter(
+                        otel_logger,
+                        agent_name=agent_name,
+                        capture_content=capture,
+                    )
+                except Exception:  # pragma: no cover - fail-open
+                    logger.warning(
+                        "observability/otel: dashboard log emitter init failed; "
+                        "spans still emit",
+                        exc_info=True,
+                    )
+                    _LOG_EMITTER = OtelLogEmitter(None)
         except Exception as exc:  # pragma: no cover - fail-open
             # Init failure is unexpected (bad endpoint, missing SDK piece): warn
             # so a misconfiguration is visible, but stay fail-open per the
