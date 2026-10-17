@@ -111,6 +111,7 @@ HERMES_OTEL_SERVICE_NAME=agent.coding.hermes   # service.name (backends group on
 HERMES_OTEL_ENDPOINT=http://localhost:4318     # OTLP HTTP endpoint
 HERMES_OTEL_AGENT_NAME=hermes                  # gen_ai.agent.name
 HERMES_OTEL_CAPTURE_CONTENT=false              # attach prompt/response text (privacy-gated)
+HERMES_OTEL_LOGS_ENABLED=true                  # set false for spans-only OTLP receivers (no /v1/logs): skips the dashboard log pipeline entirely
 HERMES_OTEL_USER_ID=                           # stamp user.id on the resource
 ```
 
@@ -196,6 +197,7 @@ config_env:                                # all optional; set in ~/.hermes/.env
   HERMES_OTEL_ENDPOINT: "OTLP HTTP endpoint (default http://localhost:4318)"
   HERMES_OTEL_AGENT_NAME: "gen_ai.agent.name (default hermes)"
   HERMES_OTEL_CAPTURE_CONTENT: "true attaches prompt/response/tool I/O text (default false, privacy-gated)"
+  HERMES_OTEL_LOGS_ENABLED: "false skips the dashboard log-record pipeline entirely — for spans-only OTLP receivers without /v1/logs (default true)"
   HERMES_OTEL_USER_ID: "stamps user.id on the OTel resource"
 span_model:
   invoke_agent: "one per Hermes turn; parent; gen_ai.conversation.id + session.id = session id"

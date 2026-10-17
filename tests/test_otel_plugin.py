@@ -780,3 +780,78 @@ class TestPluginAdapter:
         assert len(flushes) == 1  # turn close -> flush
         ctx.hooks["on_session_end"](session_id="s")
         assert len(flushes) == 2  # session end -> flush again
+
+    def test_logs_disabled_env_skips_the_log_pipeline(
+        self, exporter_and_tracer, monkeypatch
+    ):
+        """``HERMES_OTEL_LOGS_ENABLED=false`` skips the dashboard log pipeline
+        entirely — no ``build_logger`` call, so no LoggerProvider, no OTLP log
+        exporter, no POSTs to a receiver that has no ``/v1/logs`` — while the
+        span pipeline keeps emitting and every hook stays safe."""
+        exporter, tracer = exporter_and_tracer
+        plugin, provider = _fresh_plugin()
+        monkeypatch.setenv("HERMES_OTEL_LOGS_ENABLED", "false")
+        monkeypatch.setattr(provider, "build_tracer", lambda **_: tracer)
+        # A raising stub would be swallowed by the plugin's fail-open except —
+        # assert on observable behavior instead: build_logger never called, and
+        # no log record ever reaches an exporter.
+        calls: list[int] = []
+        log_exporter, otel_logger = _in_memory_logger()
+        monkeypatch.setattr(
+            provider,
+            "build_logger",
+            lambda **_: (calls.append(1), otel_logger)[1],
+        )
+
+        ctx = _FakeCtx()
+        plugin.register(ctx)
+        # The log emitter is a no-op placeholder — hooks that would emit log
+        # records still run without raising.
+        assert plugin._get_log_emitter() is not None
+        ctx.hooks["on_session_start"](session_id="sess-off", model="m")
+        ctx.hooks["pre_llm_call"](
+            session_id="sess-off", model="m", user_message="hello"
+        )
+        assert ctx.hooks["transform_llm_output"](
+            session_id="sess-off", response_text="done"
+        ) is None
+        ctx.hooks["on_session_end"](session_id="sess-off")
+        assert calls == []  # the pipeline was never built
+        assert not log_exporter.get_finished_logs()  # and nothing was emitted
+        # Spans are unaffected by the logs flag.
+        assert OP_INVOKE_AGENT in _by_name(exporter.get_finished_spans())
+
+    @pytest.mark.parametrize("value", [None, "true", "1", "on"])
+    def test_logs_pipeline_on_by_default(
+        self, exporter_and_tracer, monkeypatch, value
+    ):
+        """Without the flag (or with a truthy value) the dashboard log pipeline
+        builds exactly as before — back-compat."""
+        _exporter, tracer = exporter_and_tracer
+        plugin, provider = _fresh_plugin()
+        if value is None:
+            monkeypatch.delenv("HERMES_OTEL_LOGS_ENABLED", raising=False)
+        else:
+            monkeypatch.setenv("HERMES_OTEL_LOGS_ENABLED", value)
+        monkeypatch.setattr(provider, "build_tracer", lambda **_: tracer)
+        log_exporter, otel_logger = _in_memory_logger()
+        built: list[int] = []
+        monkeypatch.setattr(
+            provider,
+            "build_logger",
+            lambda **_: (built.append(1), otel_logger)[1],
+        )
+
+        ctx = _FakeCtx()
+        plugin.register(ctx)
+        ctx.hooks["on_session_start"](session_id="sess-on", model="m")
+        ctx.hooks["pre_llm_call"](
+            session_id="sess-on", model="m", user_message="hi"
+        )
+        ctx.hooks["on_session_end"](session_id="sess-on")
+        assert built == [1]
+        records = [
+            dict(r.log_record.attributes or {})
+            for r in log_exporter.get_finished_logs()
+        ]
+        assert any(r.get("event.name") == EVENT_USER_PROMPT for r in records)

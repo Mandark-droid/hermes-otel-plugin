@@ -9,6 +9,12 @@ All notable changes to this project are documented here. The format follows
 ### Changed
 - **Renamed the Hermes plugin key** from `otel` to `traceverse_hermes_otel` to avoid collisions with other Hermes plugins. Existing users should replace `otel` with `traceverse_hermes_otel` in `plugins.enabled` after upgrading.
 
+### Added
+- `HERMES_OTEL_LOGS_ENABLED` — set `false` to skip the dashboard log pipeline
+  entirely (no LoggerProvider, no exporter, no records) when the OTLP backend
+  is traces-only and answers `/v1/logs` with 404. Spans are unaffected; unset
+  or truthy keeps today's behavior. 2 new adapter tests (49 total).
+
 ## [1.1.1] - 2026-07-25
 
 ### Fixed
