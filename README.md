@@ -55,28 +55,35 @@ makes no changes to Hermes core. Without the OTel SDK the hooks no-op silently
 
 ## Install
 
-Any **one** of the three paths below.
+Choose one install path. The catalog key is `traceverse-hermes-otel`; the plugin's enable key is `traceverse_hermes_otel`.
 
-### A. `hermes plugins install` (recommended)
+### A. Hermes plugin catalog (recommended once listed)
+
+```bash
+hermes plugins install traceverse-hermes-otel
+hermes plugins enable traceverse_hermes_otel
+```
+
+### B. Direct GitHub install (available before catalog approval)
 
 ```bash
 hermes plugins install Mandark-droid/hermes-otel-plugin
-hermes plugins enable otel
+hermes plugins enable traceverse_hermes_otel
 ```
 
-### B. pip (entry-point discovery)
+### C. pip (entry-point discovery)
 
 ```bash
 pip install git+https://github.com/Mandark-droid/hermes-otel-plugin.git
-# then add `otel` to plugins.enabled in ~/.hermes/config.yaml, or:
-hermes plugins enable otel
+# then add `traceverse_hermes_otel` to plugins.enabled in ~/.hermes/config.yaml, or:
+hermes plugins enable traceverse_hermes_otel
 ```
 
-### C. Manual clone into `~/.hermes/plugins/`
+### D. Manual clone into `~/.hermes/plugins/`
 
 ```bash
-git clone https://github.com/Mandark-droid/hermes-otel-plugin.git ~/.hermes/plugins/otel
-hermes plugins enable otel
+git clone https://github.com/Mandark-droid/hermes-otel-plugin.git ~/.hermes/plugins/traceverse_hermes_otel
+hermes plugins enable traceverse_hermes_otel
 ```
 
 ## Quickstart
@@ -85,9 +92,9 @@ hermes plugins enable otel
 # 1. Install the OTel SDK + OTLP HTTP exporter (the only hard dependency)
 pip install opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
 
-# 2. Install + enable the plugin (any path above)
+# 2. Install + enable the plugin (direct GitHub install works before catalog approval)
 hermes plugins install Mandark-droid/hermes-otel-plugin
-hermes plugins enable otel
+hermes plugins enable traceverse_hermes_otel
 
 # 3. Send a turn, then look for an "invoke_agent" trace in your OTel backend
 hermes chat -q "hello"
@@ -114,8 +121,8 @@ when `HERMES_OTEL_CAPTURE_CONTENT=true` (privacy-gated, off by default).
 ### Verify / disable
 
 ```bash
-hermes plugins list                 # otel should show "enabled"
-hermes plugins disable otel
+hermes plugins list                 # traceverse_hermes_otel should show "enabled"
+hermes plugins disable traceverse_hermes_otel
 ```
 
 ## Architecture
@@ -176,13 +183,14 @@ A machine-readable summary of this plugin's contract (also see
 docstrings are the authoritative deep reference.
 
 ```yaml
-name: hermes-otel-plugin
+name: traceverse-hermes-otel
 purpose: Export Hermes agent telemetry over OTLP (OpenTelemetry GenAI conventions)
 install:
-  recommended: ["hermes plugins install Mandark-droid/hermes-otel-plugin",
-                "hermes plugins enable otel"]
+  recommended: ["hermes plugins install traceverse-hermes-otel",
+                "hermes plugins enable traceverse_hermes_otel"]
+  direct_fallback: "hermes plugins install Mandark-droid/hermes-otel-plugin"
   runtime_dependency: "pip install opentelemetry-sdk opentelemetry-exporter-otlp-proto-http"
-verify: "hermes plugins list   # 'otel' shows enabled; then send one turn and look for an invoke_agent trace"
+verify: "hermes plugins list   # 'traceverse_hermes_otel' shows enabled; then send one turn and look for an invoke_agent trace"
 config_env:                                # all optional; set in ~/.hermes/.env
   HERMES_OTEL_SERVICE_NAME: "service.name resource attr (default agent.coding.hermes)"
   HERMES_OTEL_ENDPOINT: "OTLP HTTP endpoint (default http://localhost:4318)"

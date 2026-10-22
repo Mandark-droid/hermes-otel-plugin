@@ -1,8 +1,17 @@
-name: otel
-version: "1.1.1"
-description: "OpenTelemetry (OTLP) observability for Hermes — exports turns, LLM calls, and tool usage as OTel GenAI-convention spans (gen_ai.*) AND dashboard-shaped OTLP log records, with local-model cost estimated from model size, to any OTLP backend. Opt in with `hermes plugins enable otel`; HERMES_OTEL_* env vars configure spans, logs, and cost after the plugin is enabled."
+name: traceverse_hermes_otel
+version: "2.0.0"
+description: "OpenTelemetry (OTLP) observability for Hermes — exports turns, LLM calls, and tool usage as OTel GenAI-convention spans (gen_ai.*) AND dashboard-shaped OTLP log records, with local-model cost estimated from model size, to any OTLP backend. Opt in with `hermes plugins enable traceverse_hermes_otel`; HERMES_OTEL_* env vars configure spans, logs, and cost after the plugin is enabled."
 author: Kshitij Thakkar (Mandark-droid)
 hooks:
+  - on_session_start
+  - on_session_end
+  - on_session_finalize
+  - on_session_reset
+  - pre_llm_call
+  - transform_llm_output
+  - post_api_request
+  - post_tool_call
+provides_hooks:
   - on_session_start
   - on_session_end
   - on_session_finalize

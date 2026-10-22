@@ -1,6 +1,6 @@
 # Advanced setup — GPU / CO2 / eval metrics (`genai_otel`)
 
-> Optional deep-dive for the [`observability/otel`](./README.md) plugin. The
+> Optional deep-dive for the [`traceverse_hermes_otel`](./README.md) plugin. The
 > README quickstart gets you GenAI-convention spans + dashboard log records
 > against any OTLP backend. This guide covers the on-prem **GPU / energy / CO2**
 > metrics and the **eval / guardrail** suite you unlock by routing through
