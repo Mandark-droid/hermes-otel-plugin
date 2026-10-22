@@ -7,7 +7,7 @@ All notable changes to this project are documented here. The format follows
 ## [2.0.0] - Unreleased
 
 ### Changed
-- **Renamed the Hermes plugin key** from `otel` to `traceverse_hermes_otel` to avoid collisions with other Hermes plugins. Existing users should disable `otel` and enable `traceverse_hermes_otel` after upgrading.
+- **Renamed the Hermes plugin key** from `otel` to `traceverse_hermes_otel` to avoid collisions with other Hermes plugins. Existing users should replace `otel` with `traceverse_hermes_otel` in `plugins.enabled` after upgrading.
 
 ## [1.1.1] - 2026-07-25
 
