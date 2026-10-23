@@ -4,6 +4,15 @@
 
 # hermes-otel-plugin — OpenTelemetry (OTLP) Observability for Hermes
 
+<p>
+  <a href="https://github.com/Mandark-droid/hermes-otel-plugin/actions/workflows/ci.yml"><img src="https://github.com/Mandark-droid/hermes-otel-plugin/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+  <a href="https://github.com/Mandark-droid/hermes-otel-plugin/releases/latest"><img src="https://img.shields.io/github/v/release/Mandark-droid/hermes-otel-plugin?display_name=tag" alt="Latest release"></a>
+  <a href="https://github.com/Mandark-droid/hermes-otel-plugin/blob/main/LICENSE"><img src="https://img.shields.io/github/license/Mandark-droid/hermes-otel-plugin" alt="License"></a>
+  <a href="https://github.com/Mandark-droid/hermes-otel-plugin/blob/main/ADVANCED.md"><img src="https://img.shields.io/badge/docs-advanced%20guide-blue" alt="Advanced documentation"></a>
+</p>
+
+[Documentation: advanced setup, GPU and evaluation metrics](ADVANCED.md) · [Changelog](CHANGELOG.md) · [Issues](https://github.com/Mandark-droid/hermes-otel-plugin/issues)
+
 A native **OpenTelemetry** observability plugin for the
 [Hermes agent](https://github.com/NousResearch/hermes-agent).
 
