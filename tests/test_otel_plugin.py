@@ -64,7 +64,7 @@ class TestManifest:
 
     def test_manifest_fields(self):
         data = yaml.safe_load((PLUGIN_DIR / "plugin.yaml").read_text(encoding="utf-8"))
-        assert data["name"] == "otel"
+        assert data["name"] == "traceverse_hermes_otel"
         assert data["version"]
         # Hooks the plugin implements — must match register() exactly.
         assert set(data["hooks"]) == {

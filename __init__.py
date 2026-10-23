@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""otel — Hermes plugin for OpenTelemetry (OTLP) observability.
+"""traceverse_hermes_otel — Hermes plugin for OpenTelemetry (OTLP) observability.
 
 Exports Hermes's built-in observability events over **OpenTelemetry** using the
 vendor-neutral **GenAI semantic conventions** (``gen_ai.*``). It slots in beside
@@ -10,7 +10,7 @@ adds an OTLP sink for them so the telemetry flows to *any* OTel backend (an
 OpenTelemetry Collector, Jaeger, Grafana Tempo, Honeycomb, …) with no lock-in.
 
 Activation is handled by the Hermes plugin system — standalone plugins only load
-when enabled (``hermes plugins enable otel``). At runtime the
+when enabled (``hermes plugins enable traceverse_hermes_otel``). At runtime the
 plugin also requires the OpenTelemetry SDK; if it is missing the hooks no-op
 (fail-open), exactly like the other observability plugins.
 
@@ -132,7 +132,7 @@ def _get_emitter() -> Any | None:
                 )
             except Exception:  # pragma: no cover - fail-open
                 logger.warning(
-                    "observability/otel: dashboard log emitter init failed; "
+                    "traceverse_hermes_otel: dashboard log emitter init failed; "
                     "spans still emit",
                     exc_info=True,
                 )
@@ -141,7 +141,7 @@ def _get_emitter() -> Any | None:
             # Init failure is unexpected (bad endpoint, missing SDK piece): warn
             # so a misconfiguration is visible, but stay fail-open per the
             # observability contract — never raise out of a hook.
-            logger.warning("observability/otel disabled: init failed: %s", exc, exc_info=True)
+            logger.warning("traceverse_hermes_otel disabled: init failed: %s", exc, exc_info=True)
             _EMITTER = _INIT_FAILED
             return None
         return _EMITTER
