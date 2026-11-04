@@ -768,6 +768,50 @@ class TestPluginAdapter:
         # String errors map to a low-cardinality class; the text is content.
         assert spans[OP_EXECUTE_TOOL].attributes["error.type"] == "ToolError"
 
+    def test_post_api_request_reads_response_from_assistant_message(
+        self, exporter_and_tracer, monkeypatch
+    ):
+        """Hermes v0.22 passes ``assistant_message`` (object or dict, content as a
+        string or a list of blocks), not ``assistant_response``."""
+        import types
+
+        exporter, tracer = exporter_and_tracer
+        plugin, provider = _fresh_plugin()
+        monkeypatch.setattr(provider, "build_tracer", lambda **_: tracer)
+        monkeypatch.setenv("HERMES_OTEL_CAPTURE_CONTENT", "true")
+        log_exporter, otel_logger = _in_memory_logger()
+        monkeypatch.setattr(provider, "build_logger", lambda **_: otel_logger)
+        ctx = _FakeCtx()
+        plugin.register(ctx)
+
+        ctx.hooks["post_api_request"](
+            session_id="s", model="m",
+            assistant_message=types.SimpleNamespace(content="plain answer"),
+        )
+        ctx.hooks["post_api_request"](
+            session_id="s", model="m",
+            assistant_message={
+                "content": [
+                    {"type": "text", "text": "block "},
+                    {"type": "tool_use", "name": "x"},
+                    {"type": "text", "text": "answer"},
+                ]
+            },
+        )
+
+        completions = [
+            span.attributes.get("gen_ai.completion")
+            for span in exporter.get_finished_spans()
+            if span.name == OP_CHAT
+        ]
+        assert completions == ["plain answer", "block answer"]
+        bodies = [
+            rec.log_record.body
+            for rec in log_exporter.get_finished_logs()
+            if rec.log_record.attributes.get("event.name") == EVENT_API_RESPONSE
+        ]
+        assert bodies == ["plain answer", "block answer"]
+
     def test_post_api_request_exports_cache_token_buckets(
         self, exporter_and_tracer, monkeypatch
     ):

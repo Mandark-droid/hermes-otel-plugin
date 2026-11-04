@@ -16,6 +16,11 @@ All notable changes to this project are documented here. The format follows
   uncached `input_tokens`, so input looked near zero.
 
 ### Fixed
+- Response text was never captured on Hermes v0.22+. `post_api_request` now
+  passes `assistant_message` (object or dict, content as a string or content
+  blocks) instead of `assistant_response`; the plugin reads either, so `chat`
+  spans get `gen_ai.completion` and `api_response` records get a body again
+  when content capture is on.
 - Tool error text no longer leaves the process when content capture is off.
   `tool_result` records keep `status_code` and `error_type` but only carry
   `error` when `HERMES_OTEL_CAPTURE_CONTENT` is true. `execute_tool` spans set
