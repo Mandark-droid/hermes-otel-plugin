@@ -4,6 +4,30 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- Prompt-cache token buckets. `chat` spans carry
+  `gen_ai.usage.cache_read.input_tokens` and
+  `gen_ai.usage.cache_creation.input_tokens`, and `api_response` records carry
+  `cache_read_tokens` / `cache_creation_tokens` (Claude Code's names). Read from
+  Hermes' normalized usage (`cache_read_tokens` / `cache_write_tokens`) or raw
+  Anthropic usage. Before this, cache-heavy Anthropic sessions reported only the
+  uncached `input_tokens`, so input looked near zero.
+
+### Fixed
+- Response text was never captured on Hermes v0.22+. `post_api_request` now
+  passes `assistant_message` (object or dict, content as a string or content
+  blocks) instead of `assistant_response`; the plugin reads either, so `chat`
+  spans get `gen_ai.completion` and `api_response` records get a body again
+  when content capture is on.
+- Tool error text no longer leaves the process when content capture is off.
+  `tool_result` records keep `status_code` and `error_type` but only carry
+  `error` when `HERMES_OTEL_CAPTURE_CONTENT` is true. `execute_tool` spans set
+  `error.type` to the exception class (or `ToolError` for string errors) and only
+  record the exception event / `error.message` when capture is on. Error text
+  often quotes tool input or output (paths, file contents, API responses).
+
 ## [2.0.0] - 2026-10-23
 
 ### Changed

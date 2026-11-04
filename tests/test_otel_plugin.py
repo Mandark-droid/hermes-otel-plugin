@@ -203,6 +203,30 @@ class TestEmitter:
         attrs = spans[OP_EXECUTE_TOOL].attributes
         assert attrs["error.type"] == "RuntimeError"
 
+    def test_tool_error_text_gated_by_capture_content(self, exporter_and_tracer):
+        exporter, tracer = exporter_and_tracer
+        OtelGenAIEmitter(tracer, capture_content=False).record_tool_call(
+            tool_name="read_file", error=RuntimeError("secret /path/contents")
+        )
+        OtelGenAIEmitter(tracer, capture_content=False).record_tool_call(
+            tool_name="terminal", error="secret command output"
+        )
+
+        for span in exporter.get_finished_spans():
+            assert not span.events  # no exception event carrying the message
+            for value in span.attributes.values():
+                assert "secret" not in str(value)
+
+    def test_tool_error_text_kept_when_capture_enabled(self, exporter_and_tracer):
+        exporter, tracer = exporter_and_tracer
+        OtelGenAIEmitter(tracer, capture_content=True).record_tool_call(
+            tool_name="terminal", error="exit 1: boom"
+        )
+
+        attrs = _by_name(exporter.get_finished_spans())[OP_EXECUTE_TOOL].attributes
+        assert attrs["error.type"] == "ToolError"
+        assert attrs["error.message"] == "exit 1: boom"
+
     def test_content_not_captured_by_default(self, exporter_and_tracer):
         exporter, tracer = exporter_and_tracer
         emitter = OtelGenAIEmitter(tracer, capture_content=False)
@@ -379,7 +403,7 @@ class TestLogEmitter:
 
     def test_tool_result_error_record(self, log_exporter_and_logger):
         exporter, otel_logger = log_exporter_and_logger
-        emitter = OtelLogEmitter(otel_logger)
+        emitter = OtelLogEmitter(otel_logger, capture_content=True)
 
         emitter.tool_result(
             session_id="sess-1",
@@ -392,6 +416,23 @@ class TestLogEmitter:
         assert rec["decision_type"] == "error"
         assert rec["error_type"] == "RuntimeError"
         assert "boom" in rec["error"]
+
+    def test_tool_result_error_text_gated_by_capture_content(
+        self, log_exporter_and_logger
+    ):
+        exporter, otel_logger = log_exporter_and_logger
+        emitter = OtelLogEmitter(otel_logger, capture_content=False)
+
+        emitter.tool_result(
+            session_id="sess-1",
+            tool_name="read_file",
+            error=RuntimeError("secret /path/contents"),
+        )
+
+        rec = _log_attrs(exporter.get_finished_logs())[EVENT_TOOL_RESULT]
+        assert rec["status_code"] == "error"
+        assert rec["error_type"] == "RuntimeError"
+        assert "error" not in rec
 
     def test_content_not_captured_by_default(self, log_exporter_and_logger):
         exporter, otel_logger = log_exporter_and_logger
@@ -724,7 +765,86 @@ class TestPluginAdapter:
         ctx.hooks["post_tool_call"](tool_name="terminal", status="error")
 
         spans = _by_name(exporter.get_finished_spans())
-        assert spans[OP_EXECUTE_TOOL].attributes["error.type"] == "error"
+        # String errors map to a low-cardinality class; the text is content.
+        assert spans[OP_EXECUTE_TOOL].attributes["error.type"] == "ToolError"
+
+    def test_post_api_request_reads_response_from_assistant_message(
+        self, exporter_and_tracer, monkeypatch
+    ):
+        """Hermes v0.22 passes ``assistant_message`` (object or dict, content as a
+        string or a list of blocks), not ``assistant_response``."""
+        import types
+
+        exporter, tracer = exporter_and_tracer
+        plugin, provider = _fresh_plugin()
+        monkeypatch.setattr(provider, "build_tracer", lambda **_: tracer)
+        monkeypatch.setenv("HERMES_OTEL_CAPTURE_CONTENT", "true")
+        log_exporter, otel_logger = _in_memory_logger()
+        monkeypatch.setattr(provider, "build_logger", lambda **_: otel_logger)
+        ctx = _FakeCtx()
+        plugin.register(ctx)
+
+        ctx.hooks["post_api_request"](
+            session_id="s", model="m",
+            assistant_message=types.SimpleNamespace(content="plain answer"),
+        )
+        ctx.hooks["post_api_request"](
+            session_id="s", model="m",
+            assistant_message={
+                "content": [
+                    {"type": "text", "text": "block "},
+                    {"type": "tool_use", "name": "x"},
+                    {"type": "text", "text": "answer"},
+                ]
+            },
+        )
+
+        completions = [
+            span.attributes.get("gen_ai.completion")
+            for span in exporter.get_finished_spans()
+            if span.name == OP_CHAT
+        ]
+        assert completions == ["plain answer", "block answer"]
+        bodies = [
+            rec.log_record.body
+            for rec in log_exporter.get_finished_logs()
+            if rec.log_record.attributes.get("event.name") == EVENT_API_RESPONSE
+        ]
+        assert bodies == ["plain answer", "block answer"]
+
+    def test_post_api_request_exports_cache_token_buckets(
+        self, exporter_and_tracer, monkeypatch
+    ):
+        """Hermes' normalized usage carries cache_read/cache_write tokens apart
+        from input_tokens; both the span and the log record must export them."""
+        exporter, tracer = exporter_and_tracer
+        plugin, provider = _fresh_plugin()
+        monkeypatch.setattr(provider, "build_tracer", lambda **_: tracer)
+        log_exporter, otel_logger = _in_memory_logger()
+        monkeypatch.setattr(provider, "build_logger", lambda **_: otel_logger)
+        ctx = _FakeCtx()
+        plugin.register(ctx)
+
+        ctx.hooks["post_api_request"](
+            session_id="s",
+            model="claude-opus",
+            usage={
+                "input_tokens": 3,
+                "output_tokens": 50,
+                "cache_read_tokens": 40000,
+                "cache_write_tokens": 1200,
+                "prompt_tokens": 41203,
+            },
+        )
+
+        span_attrs = _by_name(exporter.get_finished_spans())[OP_CHAT].attributes
+        assert span_attrs["gen_ai.usage.input_tokens"] == 3
+        assert span_attrs["gen_ai.usage.cache_read.input_tokens"] == 40000
+        assert span_attrs["gen_ai.usage.cache_creation.input_tokens"] == 1200
+        rec = _log_attrs(log_exporter.get_finished_logs())[EVENT_API_RESPONSE]
+        assert rec["input_tokens"] == 3
+        assert rec["cache_read_tokens"] == 40000
+        assert rec["cache_creation_tokens"] == 1200
 
     def test_post_hooks_backdate_spans_with_measured_duration(
         self, exporter_and_tracer, monkeypatch

@@ -163,6 +163,8 @@ class OtelGenAIEmitter:
         duration_ms: float | None = None,
         response_text: str | None = None,
         extra: Mapping[str, Any] | None = None,
+        cache_read_tokens: int | None = None,
+        cache_creation_tokens: int | None = None,
     ) -> None:
         """Emit one ``chat`` span for a single LLM API call.
 
@@ -183,6 +185,14 @@ class OtelGenAIEmitter:
             _set_if(span, "gen_ai.response.model", response_model or request_model)
             _set_if(span, "gen_ai.usage.input_tokens", _as_int(input_tokens))
             _set_if(span, "gen_ai.usage.output_tokens", _as_int(output_tokens))
+            _set_if(
+                span, "gen_ai.usage.cache_read.input_tokens", _as_int(cache_read_tokens)
+            )
+            _set_if(
+                span,
+                "gen_ai.usage.cache_creation.input_tokens",
+                _as_int(cache_creation_tokens),
+            )
             _set_if(span, "cost_usd", _as_float(cost_usd))
             if finish_reasons:
                 # OTel models this as an array; backends read index [0].
@@ -231,19 +241,27 @@ class OtelGenAIEmitter:
             if self._capture_content and result is not None:
                 _set_if(span, "gen_ai.tool.result", _safe_str(result))
             if error is not None:
-                self._record_error(span, error)
+                self._record_error(span, error, capture_content=self._capture_content)
             self._apply_extra(span, extra)
 
     # -- helpers ------------------------------------------------------------
 
     @staticmethod
-    def _record_error(span: Any, error: BaseException | str) -> None:
+    def _record_error(
+        span: Any, error: BaseException | str, *, capture_content: bool = False
+    ) -> None:
+        # The exception message / error string often quotes tool input or
+        # output, so only the error class is recorded unless content capture
+        # is on.
         try:
             if isinstance(error, BaseException):
-                span.record_exception(error)
                 span.set_attribute("error.type", type(error).__name__)
+                if capture_content:
+                    span.record_exception(error)
             else:
-                span.set_attribute("error.type", str(error))
+                span.set_attribute("error.type", "ToolError")
+                if capture_content:
+                    span.set_attribute("error.message", str(error))
         except Exception:  # pragma: no cover - defensive
             logger.warning("failed to record tool error on span", exc_info=True)
 

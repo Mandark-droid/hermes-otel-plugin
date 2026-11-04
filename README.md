@@ -205,7 +205,7 @@ config_env:                                # all optional; set in ~/.hermes/.env
   HERMES_OTEL_SERVICE_NAME: "service.name resource attr (default agent.coding.hermes)"
   HERMES_OTEL_ENDPOINT: "OTLP HTTP endpoint (default http://localhost:4318)"
   HERMES_OTEL_AGENT_NAME: "gen_ai.agent.name (default hermes)"
-  HERMES_OTEL_CAPTURE_CONTENT: "true attaches prompt/response/tool I/O text (default false, privacy-gated)"
+  HERMES_OTEL_CAPTURE_CONTENT: "true attaches prompt/response/tool I/O and tool error text (default false, privacy-gated)"
   HERMES_OTEL_LOGS_ENABLED: "false skips the dashboard log-record pipeline entirely — for spans-only OTLP receivers without /v1/logs (default true)"
   HERMES_OTEL_USER_ID: "stamps user.id on the OTel resource"
 span_model:
@@ -217,6 +217,7 @@ key_attributes:
   - gen_ai.system                # always "hermes"
   - gen_ai.request.model / gen_ai.response.model
   - gen_ai.usage.input_tokens / gen_ai.usage.output_tokens
+  - gen_ai.usage.cache_read.input_tokens / gen_ai.usage.cache_creation.input_tokens  # prompt-cache buckets, when the provider reports them
   - gen_ai.response.finish_reasons   # array; [0] is the primary reason
   - gen_ai.tool.name / gen_ai.tool.type
   - cost_usd                     # real or size-tier-estimated for local models
