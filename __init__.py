@@ -415,6 +415,14 @@ def on_post_api_request(**kwargs: Any) -> None:
         ttft_ms = call_duration_ms
         input_tokens = _usage_field(usage, "input_tokens", "prompt_tokens")
         output_tokens = _usage_field(usage, "output_tokens", "completion_tokens")
+        # Hermes' normalized usage reports prompt-cache buckets separately from
+        # input_tokens; raw Anthropic usage uses the *_input_tokens names.
+        cache_read_tokens = _usage_field(
+            usage, "cache_read_tokens", "cache_read_input_tokens"
+        )
+        cache_creation_tokens = _usage_field(
+            usage, "cache_write_tokens", "cache_creation_input_tokens"
+        )
         cost_usd = kwargs.get("cost_usd") or kwargs.get("cost")
         # Local backends (Ollama/HF/vLLM) report no price. Mirror
         # genai-otel-instrument: estimate cost from model size + tokens so the
@@ -441,6 +449,8 @@ def on_post_api_request(**kwargs: Any) -> None:
             ttft_ms=ttft_ms,
             duration_ms=call_duration_ms,
             response_text=kwargs.get("assistant_response"),
+            cache_read_tokens=cache_read_tokens,
+            cache_creation_tokens=cache_creation_tokens,
         )
     except Exception:
         logger.debug("on_post_api_request: failed to emit chat span", exc_info=True)
@@ -459,6 +469,8 @@ def on_post_api_request(**kwargs: Any) -> None:
                 finish_reasons=finish,
                 ttft_ms=ttft_ms,
                 response_text=kwargs.get("assistant_response"),
+                cache_read_tokens=cache_read_tokens,
+                cache_creation_tokens=cache_creation_tokens,
             )
         except Exception:
             logger.debug("on_post_api_request: failed to emit api_response log", exc_info=True)
