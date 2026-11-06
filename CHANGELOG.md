@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [2.0.1] - 2026-11-06
+
+### Fixed
+- **`chat` and `execute_tool` spans nest under the turn again.** They relied on the
+  implicit current OTel span, but Hermes can fire `post_api_request` / `post_tool_call`
+  on a different thread or context from `pre_llm_call`, where the turn's
+  `invoke_agent` span was opened. There the context is empty, so every per-call
+  span became its own one-span trace and no waterfall formed (seen on Hermes
+  v0.21.6 with a local Jaeger: 43 traces of 1 span each from 5 turns). Per-call
+  spans are now parented explicitly on the session's open `invoke_agent` span.
+  Regression test fires the hooks from a separate thread (50 tests).
+
 ## [2.0.0] - 2026-10-23
 
 ### Changed

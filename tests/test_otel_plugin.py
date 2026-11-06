@@ -511,6 +511,49 @@ def _in_memory_logger():
 
 
 class TestPluginAdapter:
+    def test_child_spans_nest_under_the_turn_when_hooks_fire_on_another_thread(
+        self, exporter_and_tracer, monkeypatch
+    ):
+        """Hermes can fire ``post_api_request`` / ``post_tool_call`` on a different
+        thread (or contextvars context) from ``pre_llm_call``. A new thread starts with
+        an empty OTel context, so a child span that relies on the implicit *current*
+        span becomes its own trace and the turn's waterfall never forms. The child
+        spans must be parented explicitly on the session's open ``invoke_agent`` span.
+        """
+        import threading
+
+        exporter, tracer = exporter_and_tracer
+        plugin, provider = _fresh_plugin()
+        monkeypatch.setattr(provider, "build_tracer", lambda **_: tracer)
+        _log_exporter, otel_logger = _in_memory_logger()
+        monkeypatch.setattr(provider, "build_logger", lambda **_: otel_logger)
+
+        ctx = _FakeCtx()
+        plugin.register(ctx)
+        ctx.hooks["on_session_start"](session_id="sess-t", model="gemma")
+        ctx.hooks["pre_llm_call"](session_id="sess-t", user_message="run the tests")
+
+        def worker():
+            ctx.hooks["post_api_request"](
+                session_id="sess-t", model="gemma", usage={"input_tokens": 10, "output_tokens": 2}, api_duration=0.2
+            )
+            ctx.hooks["post_tool_call"](
+                session_id="sess-t", tool_name="terminal", args={"command": "pytest"}, result="{}", duration_ms=40
+            )
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+        ctx.hooks["transform_llm_output"](session_id="sess-t", response_text="done")
+        ctx.hooks["on_session_end"](session_id="sess-t")
+
+        spans = _by_name(exporter.get_finished_spans())
+        invoke, chat, tool = spans[OP_INVOKE_AGENT], spans[OP_CHAT], spans[OP_EXECUTE_TOOL]
+        for child in (chat, tool):
+            assert child.parent is not None, f"{child.name} is a root span"
+            assert child.parent.span_id == invoke.context.span_id
+            assert child.context.trace_id == invoke.context.trace_id
+
     def test_register_wires_the_documented_hooks(self):
         plugin, _provider = _fresh_plugin()
         ctx = _FakeCtx()

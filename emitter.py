@@ -53,6 +53,22 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from typing import Any
 
+
+def _parent_context(parent: Any) -> Any:
+    """An OTel context whose current span is ``parent``, or None to use the ambient one.
+
+    Hermes can fire the per-call hooks on a different thread (or contextvars context)
+    from ``pre_llm_call``, where the turn span was opened. A new thread starts with an
+    empty OTel context, so relying on the implicit current span made every ``chat`` and
+    ``execute_tool`` span its own trace. Parenting on the turn span explicitly keeps the
+    turn's waterfall intact wherever the hook runs.
+    """
+    if parent is None:
+        return None
+    from opentelemetry import trace
+
+    return trace.set_span_in_context(parent)
+
 logger = logging.getLogger(__name__)
 
 # OTel GenAI operation names (stable across the spec).
@@ -163,11 +179,12 @@ class OtelGenAIEmitter:
         duration_ms: float | None = None,
         response_text: str | None = None,
         extra: Mapping[str, Any] | None = None,
+        parent: Any = None,
     ) -> None:
         """Emit one ``chat`` span for a single LLM API call.
 
-        Nested under the active ``invoke_agent`` span when called inside
-        :meth:`turn_span`. Carries tokens, cost, finish reason, and TTFT.
+        Nested under ``parent`` (the turn's ``invoke_agent`` span) when given, else
+        under the active span. Carries tokens, cost, finish reason, and TTFT.
 
         Hermes hooks fire *after* the API call completes, so the span is
         backdated by ``duration_ms`` (the wall-clock time Hermes measured for
@@ -175,7 +192,7 @@ class OtelGenAIEmitter:
         rendering as a zero-length tick in trace waterfalls.
         """
         with self._tracer.start_as_current_span(
-            OP_CHAT, start_time=_backdated_start(duration_ms)
+            OP_CHAT, context=_parent_context(parent), start_time=_backdated_start(duration_ms)
         ) as span:
             span.set_attribute("gen_ai.operation.name", OP_CHAT)
             span.set_attribute("gen_ai.system", GEN_AI_SYSTEM)
@@ -208,6 +225,7 @@ class OtelGenAIEmitter:
         error: BaseException | str | None = None,
         duration_ms: float | None = None,
         extra: Mapping[str, Any] | None = None,
+        parent: Any = None,
     ) -> None:
         """Emit one ``execute_tool`` span for a single tool call.
 
@@ -218,7 +236,7 @@ class OtelGenAIEmitter:
         :meth:`record_llm_call`.
         """
         with self._tracer.start_as_current_span(
-            OP_EXECUTE_TOOL, start_time=_backdated_start(duration_ms)
+            OP_EXECUTE_TOOL, context=_parent_context(parent), start_time=_backdated_start(duration_ms)
         ) as span:
             span.set_attribute("gen_ai.operation.name", OP_EXECUTE_TOOL)
             span.set_attribute("gen_ai.system", GEN_AI_SYSTEM)
