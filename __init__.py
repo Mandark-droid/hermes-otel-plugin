@@ -195,6 +195,13 @@ def _session_id_or_active(kwargs: dict[str, Any]) -> str:
         return _ACTIVE_SESSION_ID
 
 
+def _open_turn_span(kwargs: dict[str, Any]) -> Any | None:
+    """The session's open ``invoke_agent`` span, to parent per-call spans on explicitly."""
+    session_id = _session_id_or_active(kwargs)
+    with _OPEN_TURNS_LOCK:
+        return _OPEN_TURN_SPANS.get(session_id)
+
+
 def _as_list(value: Any) -> list[Any] | None:
     if value is None:
         return None
@@ -485,6 +492,7 @@ def on_post_api_request(**kwargs: Any) -> None:
             response_text=response_text,
             cache_read_tokens=cache_read_tokens,
             cache_creation_tokens=cache_creation_tokens,
+            parent=_open_turn_span(kwargs),
         )
     except Exception:
         logger.debug("on_post_api_request: failed to emit chat span", exc_info=True)
@@ -529,6 +537,7 @@ def on_post_tool_call(**kwargs: Any) -> None:
             result=kwargs.get("result"),
             error=error,
             duration_ms=kwargs.get("duration_ms"),
+            parent=_open_turn_span(kwargs),
         )
     except Exception:
         logger.debug("on_post_tool_call: failed to emit execute_tool span", exc_info=True)
