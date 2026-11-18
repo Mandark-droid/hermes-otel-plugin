@@ -28,6 +28,30 @@ All notable changes to this project are documented here. The format follows
   record the exception event / `error.message` when capture is on. Error text
   often quotes tool input or output (paths, file contents, API responses).
 
+## [2.1.0] - 2026-11-18
+
+### Added
+- **Sub-agents are linked to the run that delegated them.** A Hermes sub-agent
+  started by `delegate_task` runs as its own session, and until now its spans
+  formed a separate trace with nothing pointing back at the parent: the
+  `delegate_task` span was only created after the tool returned, and the plugin
+  did not listen to Hermes's `subagent_start` hook. The plugin now opens the
+  `delegate_task` `execute_tool` span on `pre_tool_call` and closes it on
+  `post_tool_call`, and each sub-agent's `invoke_agent` span is its child, so the
+  parent and its sub-agents form one trace. The parent is set explicitly, so the
+  link holds on Hermes's worker threads.
+- Link attributes, ids only and emitted whether or not content capture is on:
+  `hermes.parent_session_id` and `hermes.delegation.task_index` on every span of
+  a sub-agent, and `hermes.delegation.child_session_ids` on the parent's
+  `delegate_task` span. The task index is matched on the task's goal, so it stays
+  right when Hermes skips a refused task. A sub-agent that `subagent_start` never
+  announced still carries `hermes.parent_session_id`, read from `pre_llm_call`.
+- New hooks: `pre_tool_call` (a read-only observer that acts only on
+  `delegate_task` and always returns `None`) and `subagent_start`.
+  7 new tests (57 total): parallel sub-agents, a failed sub-agent, content
+  capture on and off, an unannounced sub-agent, other tools unaffected, and a
+  `delegate_task` span closed when its session ends without `post_tool_call`.
+
 ## [2.0.1] - 2026-11-06
 
 ### Fixed

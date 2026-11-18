@@ -39,6 +39,12 @@ GenAI attribute conventions emitted (the names the OTel GenAI spec defines):
     gen_ai.tool.name                 tool name (execute_tool span)
     gen_ai.tool.type                 function | extension
 
+Sub-agent linkage (ids only, emitted whether or not content capture is on):
+
+    hermes.parent_session_id               on a sub-agent's spans: the delegating session
+    hermes.delegation.task_index           on a sub-agent's spans: its index in delegate_task's tasks
+    hermes.delegation.child_session_ids    on the parent's delegate_task span: [child session ids]
+
 Extras (interoperable, safe no-ops on any conventions-aware backend):
 
     cost_usd                         float   (estimated, if available)
@@ -130,13 +136,18 @@ class OtelGenAIEmitter:
         model: str | None = None,
         user_prompt: str | None = None,
         extra: Mapping[str, Any] | None = None,
+        parent: Any = None,
     ) -> Iterator[Any]:
         """Open the ``invoke_agent`` span for one Hermes turn.
 
         This is the session-boundary span. ``gen_ai.conversation.id`` carries
         the Hermes session id so any backend can group spans by session.
+
+        ``parent`` is set for a delegated sub-agent's turn: the parent's
+        ``delegate_task`` ``execute_tool`` span, so the parent and its sub-agents
+        form one trace. ``None`` keeps the ambient context (a top-level turn).
         """
-        with self._tracer.start_as_current_span(OP_INVOKE_AGENT) as span:
+        with self._tracer.start_as_current_span(OP_INVOKE_AGENT, context=_parent_context(parent)) as span:
             span.set_attribute("gen_ai.operation.name", OP_INVOKE_AGENT)
             span.set_attribute("gen_ai.system", GEN_AI_SYSTEM)
             span.set_attribute("gen_ai.agent.name", self._agent_name)
@@ -245,13 +256,44 @@ class OtelGenAIEmitter:
         tool run) so the span covers the real execution window — see
         :meth:`record_llm_call`.
         """
-        with self._tracer.start_as_current_span(
-            OP_EXECUTE_TOOL, context=_parent_context(parent), start_time=_backdated_start(duration_ms)
-        ) as span:
-            span.set_attribute("gen_ai.operation.name", OP_EXECUTE_TOOL)
-            span.set_attribute("gen_ai.system", GEN_AI_SYSTEM)
-            span.set_attribute("gen_ai.tool.name", tool_name)
-            span.set_attribute("gen_ai.tool.type", tool_type)
+        span = self.start_tool_span(
+            tool_name=tool_name, tool_type=tool_type, parent=parent, start_time=_backdated_start(duration_ms)
+        )
+        self.finish_tool_span(span, arguments=arguments, result=result, error=error, extra=extra)
+
+    def start_tool_span(
+        self,
+        *,
+        tool_name: str,
+        tool_type: str = "function",
+        parent: Any = None,
+        start_time: int | None = None,
+    ) -> Any:
+        """Open an ``execute_tool`` span that stays open while the tool runs.
+
+        Most tool spans are emitted after the fact by :meth:`record_tool_call`.
+        A tool that starts other agents (``delegate_task``) needs its span to
+        exist *while* it runs, so the sub-agents' turns can be parented on it.
+        Close it with :meth:`finish_tool_span`.
+        """
+        span = self._tracer.start_span(OP_EXECUTE_TOOL, context=_parent_context(parent), start_time=start_time)
+        span.set_attribute("gen_ai.operation.name", OP_EXECUTE_TOOL)
+        span.set_attribute("gen_ai.system", GEN_AI_SYSTEM)
+        span.set_attribute("gen_ai.tool.name", tool_name)
+        span.set_attribute("gen_ai.tool.type", tool_type)
+        return span
+
+    def finish_tool_span(
+        self,
+        span: Any,
+        *,
+        arguments: Mapping[str, Any] | None = None,
+        result: Any = None,
+        error: BaseException | str | None = None,
+        extra: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Stamp a tool span's arguments/result/error (content-gated) and end it."""
+        try:
             if self._capture_content and arguments is not None:
                 # Best-effort: stringify so non-serializable args never crash
                 # observability (observability must never break the agent).
@@ -261,6 +303,8 @@ class OtelGenAIEmitter:
             if error is not None:
                 self._record_error(span, error, capture_content=self._capture_content)
             self._apply_extra(span, extra)
+        finally:
+            span.end()
 
     # -- helpers ------------------------------------------------------------
 

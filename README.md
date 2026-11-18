@@ -141,7 +141,22 @@ hermes plugins disable traceverse_hermes_otel
 invoke_agent        per Hermes turn   (gen_ai.conversation.id = session id)
   ├── chat          per LLM API call  (tokens, cost, finish reason, TTFT)
   └── execute_tool  per tool call     (gen_ai.tool.name / .type, errors)
+        └── invoke_agent  a delegated sub-agent's turn (delegate_task only)
+              ├── chat
+              └── execute_tool
 ```
+
+**Sub-agents (since v2.1.0).** When Hermes delegates work with `delegate_task`,
+each sub-agent's `invoke_agent` span is a child of the parent's `delegate_task`
+`execute_tool` span, so the parent and its sub-agents form one trace. Each
+sub-agent keeps its own session id, and the link is also stamped as ids (never
+content, so it is emitted with content capture off):
+
+| Attribute | On | Value |
+|---|---|---|
+| `hermes.parent_session_id` | every span of a sub-agent | the delegating session's id |
+| `hermes.delegation.task_index` | every span of a sub-agent | its index in `delegate_task`'s `tasks` |
+| `hermes.delegation.child_session_ids` | the parent's `delegate_task` span | the sub-agents' session ids |
 
 `gen_ai.system = hermes` on every span; `service.name` defaults to
 `agent.coding.hermes`. Spans and dashboard log records are emitted in parallel
@@ -212,6 +227,7 @@ span_model:
   invoke_agent: "one per Hermes turn; parent; gen_ai.conversation.id + session.id = session id"
   chat: "one per LLM API call; child; real measured duration (backdated start)"
   execute_tool: "one per tool call; child; real measured duration (backdated start)"
+  sub_agent: "a delegate_task sub-agent's invoke_agent is a child of the parent's delegate_task execute_tool span (one trace)"
 key_attributes:
   - gen_ai.operation.name        # invoke_agent | chat | execute_tool
   - gen_ai.system                # always "hermes"
@@ -222,6 +238,9 @@ key_attributes:
   - gen_ai.tool.name / gen_ai.tool.type
   - cost_usd                     # real or size-tier-estimated for local models
   - copilot_chat.time_to_first_token  # measured API latency, ms
+  - hermes.parent_session_id     # sub-agent spans: the delegating session id
+  - hermes.delegation.task_index # sub-agent spans: index in delegate_task's tasks
+  - hermes.delegation.child_session_ids  # parent's delegate_task span: sub-agent session ids
 log_events: [user_prompt, session_start, api_response, tool_result]  # OTLP log records, dashboard-shaped
 guarantees:
   - "fail-open: without the OTel SDK every hook no-ops; observability never breaks the agent"
