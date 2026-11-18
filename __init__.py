@@ -39,6 +39,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -296,6 +297,38 @@ def _as_list(value: Any) -> list[Any] | None:
     return [value]
 
 
+def _response_text(kwargs: Mapping[str, Any]) -> str | None:
+    """Assistant text for a ``post_api_request`` call.
+
+    Older hooks passed ``assistant_response`` (a string). Hermes v0.22 passes
+    ``assistant_message`` (the message object, or a dict) instead, whose
+    ``content`` is a string or a list of content blocks.
+    """
+    text = kwargs.get("assistant_response")
+    if isinstance(text, str) and text:
+        return text
+    message = kwargs.get("assistant_message")
+    if message is None:
+        return None
+    content = (
+        message.get("content") if isinstance(message, Mapping) else getattr(message, "content", None)
+    )
+    if isinstance(content, str):
+        return content or None
+    if isinstance(content, Sequence):
+        parts = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, Mapping):
+                if block.get("type", "text") == "text" and isinstance(block.get("text"), str):
+                    parts.append(block["text"])
+            elif isinstance(getattr(block, "text", None), str):
+                parts.append(block.text)
+        return "".join(parts) or None
+    return None
+
+
 def _usage_field(usage: Any, *names: str) -> Any:
     """Read the first present field from a usage dict or object."""
     for name in names:
@@ -535,6 +568,14 @@ def on_post_api_request(**kwargs: Any) -> None:
         ttft_ms = call_duration_ms
         input_tokens = _usage_field(usage, "input_tokens", "prompt_tokens")
         output_tokens = _usage_field(usage, "output_tokens", "completion_tokens")
+        # Hermes' normalized usage reports prompt-cache buckets separately from
+        # input_tokens; raw Anthropic usage uses the *_input_tokens names.
+        cache_read_tokens = _usage_field(
+            usage, "cache_read_tokens", "cache_read_input_tokens"
+        )
+        cache_creation_tokens = _usage_field(
+            usage, "cache_write_tokens", "cache_creation_input_tokens"
+        )
         cost_usd = kwargs.get("cost_usd") or kwargs.get("cost")
         # Local backends (Ollama/HF/vLLM) report no price. Mirror
         # genai-otel-instrument: estimate cost from model size + tokens so the
@@ -551,6 +592,7 @@ def on_post_api_request(**kwargs: Any) -> None:
             except Exception:
                 logger.debug("cost estimation failed", exc_info=True)
         finish = _as_list(kwargs.get("finish_reason"))
+        response_text = _response_text(kwargs)
         emitter.record_llm_call(
             request_model=kwargs.get("model"),
             response_model=kwargs.get("response_model"),
@@ -560,7 +602,9 @@ def on_post_api_request(**kwargs: Any) -> None:
             finish_reasons=finish,
             ttft_ms=ttft_ms,
             duration_ms=call_duration_ms,
-            response_text=kwargs.get("assistant_response"),
+            response_text=response_text,
+            cache_read_tokens=cache_read_tokens,
+            cache_creation_tokens=cache_creation_tokens,
             extra=_link_attributes(kwargs),
             parent=_open_turn_span(kwargs),
         )
@@ -580,7 +624,9 @@ def on_post_api_request(**kwargs: Any) -> None:
                 cost_usd=cost_usd,
                 finish_reasons=finish,
                 ttft_ms=ttft_ms,
-                response_text=kwargs.get("assistant_response"),
+                response_text=response_text,
+                cache_read_tokens=cache_read_tokens,
+                cache_creation_tokens=cache_creation_tokens,
             )
         except Exception:
             logger.debug("on_post_api_request: failed to emit api_response log", exc_info=True)
