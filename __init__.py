@@ -31,6 +31,7 @@ Span model (GenAI conventions):
     invoke_agent      per Hermes turn   (gen_ai.conversation.id = session id)
       ├── chat        per LLM API call  (tokens, cost, finish reason, TTFT)
       └── execute_tool  per tool call   (gen_ai.tool.name, gen_ai.tool.type)
+            └── invoke_agent  a delegated sub-agent's turn (delegate_task only)
 """
 
 from __future__ import annotations
@@ -59,6 +60,62 @@ _OPEN_TURNS: dict[str, Any] = {}
 # The invoke_agent span object for each open turn (same key + lock). Held so a
 # later hook (pre_llm_call) can stamp the prompt onto the still-open span.
 _OPEN_TURN_SPANS: dict[str, Any] = {}
+
+# Sub-agent linkage. delegate_task's execute_tool span is opened on pre_tool_call
+# (not after the fact) so each sub-agent's turn can be its child.
+#   _DELEGATIONS        (session_id, tool_call_id) -> open _Delegation
+#   _LATEST_DELEGATION  session_id -> its newest open _Delegation (subagent_start
+#                       names the parent session but not the tool call)
+#   _CHILD_LINKS        child session_id -> _ChildLink, until the child session ends
+_LINKS_LOCK = threading.Lock()
+_DELEGATIONS: dict[tuple[str, str], Any] = {}
+_LATEST_DELEGATION: dict[str, Any] = {}
+_CHILD_LINKS: dict[str, Any] = {}
+# A child whose session never ends (crash, os._exit) must not leak its link forever.
+_MAX_CHILD_LINKS = 1024
+DELEGATE_TOOL = "delegate_task"
+
+
+class _Delegation:
+    """One running ``delegate_task`` call: its open span and the tasks it was given."""
+
+    def __init__(self, span: Any, session_id: str, goals: list[Any]) -> None:
+        self.span = span
+        self.session_id = session_id
+        self.goals = goals
+        self.claimed: set[int] = set()
+        self.child_session_ids: list[str] = []
+
+    def claim_task_index(self, goal: Any) -> int | None:
+        """Task index of a child with this goal: the first unclaimed task with the
+        same goal, else the next unclaimed task in order. Hermes builds children in
+        task order but skips a refused task, so order alone can be off by one; the
+        goal match is what makes it exact."""
+        for i, task_goal in enumerate(self.goals):
+            if i not in self.claimed and goal is not None and task_goal == goal:
+                self.claimed.add(i)
+                return i
+        for i in range(len(self.goals)):
+            if i not in self.claimed:
+                self.claimed.add(i)
+                return i
+        return None
+
+
+class _ChildLink:
+    """What a sub-agent's spans need to know about the run that delegated it."""
+
+    def __init__(self, parent_span: Any, parent_session_id: str, task_index: int | None) -> None:
+        self.parent_span = parent_span
+        self.parent_session_id = parent_session_id
+        self.task_index = task_index
+
+    def attributes(self) -> dict[str, Any]:
+        attrs: dict[str, Any] = {"hermes.parent_session_id": self.parent_session_id}
+        if self.task_index is not None:
+            attrs["hermes.delegation.task_index"] = self.task_index
+        return attrs
+
 
 # Last session id we opened a turn for, used as a fallback when a per-call hook
 # (post_api_request / post_tool_call) does not carry the session id in kwargs.
@@ -201,6 +258,36 @@ def _open_turn_span(kwargs: dict[str, Any]) -> Any | None:
         return _OPEN_TURN_SPANS.get(session_id)
 
 
+def _delegate_goals(args: Any) -> list[Any]:
+    """The goal of each task in delegate_task's arguments (a ``tasks`` list, or one ``goal``)."""
+    if not isinstance(args, dict):
+        return []
+    tasks = args.get("tasks")
+    if isinstance(tasks, list) and tasks:
+        return [t.get("goal") if isinstance(t, dict) else None for t in tasks]
+    if args.get("goal") is not None:
+        return [args.get("goal")]
+    return []
+
+
+def _child_link(session_id: str) -> Any | None:
+    with _LINKS_LOCK:
+        return _CHILD_LINKS.get(session_id)
+
+
+def _link_attributes(kwargs: dict[str, Any]) -> dict[str, Any] | None:
+    """Sub-agent linkage attributes for a span of this hook's session, if it is a sub-agent."""
+    link = _child_link(_session_id_or_active(kwargs))
+    return link.attributes() if link is not None else None
+
+
+def _remember_child(child_session_id: str, link: Any) -> None:
+    with _LINKS_LOCK:
+        _CHILD_LINKS[child_session_id] = link
+        while len(_CHILD_LINKS) > _MAX_CHILD_LINKS:
+            _CHILD_LINKS.pop(next(iter(_CHILD_LINKS)))
+
+
 def _as_list(value: Any) -> list[Any] | None:
     if value is None:
         return None
@@ -267,8 +354,25 @@ def _end_turn(**kwargs: Any) -> None:
     with _OPEN_TURNS_LOCK:
         cm = _OPEN_TURNS.pop(session_id, None)
         _OPEN_TURN_SPANS.pop(session_id, None)
+    with _LINKS_LOCK:
+        _CHILD_LINKS.pop(session_id, None)
+    _close_open_delegations(session_id)
     _close_cm(cm)
     _flush_turn()
+
+
+def _close_open_delegations(session_id: str) -> None:
+    """End any delegate_task span of this session that never saw its ``post_tool_call``."""
+    with _LINKS_LOCK:
+        keys = [k for k in _DELEGATIONS if k[0] == session_id]
+        stale = [_DELEGATIONS.pop(k) for k in keys]
+        if _LATEST_DELEGATION.get(session_id) in stale:
+            _LATEST_DELEGATION.pop(session_id, None)
+    for delegation in stale:
+        try:
+            delegation.span.end()
+        except Exception:
+            logger.debug("failed to end an unfinished delegate_task span", exc_info=True)
 
 
 # on_session_end / on_session_finalize / on_session_reset all close the turn.
@@ -297,11 +401,20 @@ def on_pre_llm_call(**kwargs: Any) -> None:
     with _OPEN_TURNS_LOCK:
         if session_id in _OPEN_TURNS:
             return  # same turn (tool-loop continuation) — keep the open span
+    link = _child_link(session_id)
+    if link is None and kwargs.get("parent_session_id"):
+        # A sub-agent that subagent_start never announced (for example, its
+        # delegate_task pre_tool_call did not fire): Hermes still names the
+        # parent session here, so the ids are stamped even without a parent span.
+        link = _ChildLink(None, str(kwargs["parent_session_id"]), None)
+        _remember_child(session_id, link)
     try:
         cm = emitter.turn_span(
             session_id=session_id,
             model=kwargs.get("model"),
             user_prompt=kwargs.get("user_message"),
+            extra=link.attributes() if link is not None else None,
+            parent=link.parent_span if link is not None else None,
         )
         span = cm.__enter__()
         with _OPEN_TURNS_LOCK:
@@ -448,6 +561,7 @@ def on_post_api_request(**kwargs: Any) -> None:
             ttft_ms=ttft_ms,
             duration_ms=call_duration_ms,
             response_text=kwargs.get("assistant_response"),
+            extra=_link_attributes(kwargs),
             parent=_open_turn_span(kwargs),
         )
     except Exception:
@@ -484,15 +598,26 @@ def on_post_tool_call(**kwargs: Any) -> None:
             error = status
         tool_name = str(kwargs.get("tool_name") or "unknown")
         tool_type = str(kwargs.get("tool_type") or "function")
-        emitter.record_tool_call(
-            tool_name=tool_name,
-            tool_type=tool_type,
-            arguments=kwargs.get("args"),
-            result=kwargs.get("result"),
-            error=error,
-            duration_ms=kwargs.get("duration_ms"),
-            parent=_open_turn_span(kwargs),
-        )
+        delegation = _pop_delegation(kwargs) if tool_name == DELEGATE_TOOL else None
+        if delegation is not None:
+            emitter.finish_tool_span(
+                delegation.span,
+                arguments=kwargs.get("args"),
+                result=kwargs.get("result"),
+                error=error,
+                extra=_link_attributes(kwargs),
+            )
+        else:
+            emitter.record_tool_call(
+                tool_name=tool_name,
+                tool_type=tool_type,
+                arguments=kwargs.get("args"),
+                result=kwargs.get("result"),
+                error=error,
+                duration_ms=kwargs.get("duration_ms"),
+                extra=_link_attributes(kwargs),
+                parent=_open_turn_span(kwargs),
+            )
     except Exception:
         logger.debug("on_post_tool_call: failed to emit execute_tool span", exc_info=True)
         return
@@ -512,6 +637,90 @@ def on_post_tool_call(**kwargs: Any) -> None:
             logger.debug("on_post_tool_call: failed to emit tool_result log", exc_info=True)
 
 
+def _pop_delegation(kwargs: dict[str, Any]) -> Any | None:
+    """Take the open delegate_task span that this ``post_tool_call`` closes."""
+    session_id = _session_id_or_active(kwargs)
+    with _LINKS_LOCK:
+        delegation = _DELEGATIONS.pop((session_id, str(kwargs.get("tool_call_id") or "")), None)
+        if delegation is None:
+            # No tool_call_id match: take this session's newest open delegation.
+            delegation = _LATEST_DELEGATION.get(session_id)
+            if delegation is not None:
+                for key, value in list(_DELEGATIONS.items()):
+                    if value is delegation:
+                        _DELEGATIONS.pop(key)
+        if delegation is not None and _LATEST_DELEGATION.get(session_id) is delegation:
+            _LATEST_DELEGATION.pop(session_id, None)
+    return delegation
+
+
+def on_pre_tool_call(**kwargs: Any) -> None:
+    """Open delegate_task's ``execute_tool`` span before the tool runs.
+
+    Every other tool span is emitted after the fact on ``post_tool_call``. A
+    delegate_task call starts sub-agents while it runs, and their turns can only
+    be children of its span if the span already exists, so it is opened here and
+    closed on ``post_tool_call``. Read-only observer: always returns ``None``
+    (``pre_tool_call`` is Hermes's policy hook; a return value could block or
+    rewrite the call).
+    """
+    if kwargs.get("tool_name") != DELEGATE_TOOL:
+        return
+    emitter = _get_emitter()
+    if emitter is None:
+        return
+    try:
+        session_id = _session_id_or_active(kwargs)
+        span = emitter.start_tool_span(
+            tool_name=DELEGATE_TOOL,
+            tool_type=str(kwargs.get("tool_type") or "function"),
+            parent=_open_turn_span(kwargs),
+        )
+        delegation = _Delegation(span, session_id, _delegate_goals(kwargs.get("args")))
+        with _LINKS_LOCK:
+            _DELEGATIONS[(session_id, str(kwargs.get("tool_call_id") or ""))] = delegation
+            _LATEST_DELEGATION[session_id] = delegation
+    except Exception:
+        logger.debug("on_pre_tool_call: failed to open delegate_task span", exc_info=True)
+
+
+def on_subagent_start(**kwargs: Any) -> None:
+    """Link a starting sub-agent to the delegate_task call that started it.
+
+    Hermes fires ``subagent_start`` once per child, on the delegating thread,
+    inside the delegate_task call. Records the child's parent span, parent
+    session and task index (used when the child's turn opens) and adds the
+    child's session id to the parent's delegate_task span. Ids only, so this
+    runs whether or not content capture is on.
+    """
+    if _get_emitter() is None:
+        return
+    try:
+        child_session_id = kwargs.get("child_session_id")
+        if not child_session_id:
+            return
+        child_session_id = str(child_session_id)
+        parent_session_id = str(kwargs.get("parent_session_id") or "")
+        child_ids: list[str] = []
+        task_index = None
+        with _LINKS_LOCK:
+            delegation = _LATEST_DELEGATION.get(parent_session_id)
+            if delegation is not None:
+                task_index = delegation.claim_task_index(kwargs.get("child_goal"))
+                delegation.child_session_ids.append(child_session_id)
+                child_ids = list(delegation.child_session_ids)
+        if delegation is not None:
+            delegation.span.set_attribute("hermes.delegation.child_session_ids", child_ids)
+            link = _ChildLink(delegation.span, parent_session_id, task_index)
+        else:
+            # No open delegate_task span (another plugin vetoed the call, or the
+            # child was spawned outside the tool): parent on the delegating turn.
+            link = _ChildLink(_open_turn_span({"session_id": parent_session_id}), parent_session_id, None)
+        _remember_child(child_session_id, link)
+    except Exception:
+        logger.debug("on_subagent_start: failed to link sub-agent", exc_info=True)
+
+
 def register(ctx) -> None:
     """Register the plugin's lifecycle hooks with Hermes.
 
@@ -524,6 +733,8 @@ def register(ctx) -> None:
     * transform_llm_output → stamp the model response onto the open turn span
     * post_api_request     → ``chat`` span (tokens, cost, finish reason, TTFT)
     * post_tool_call       → ``execute_tool`` span (tool name/type, errors)
+    * pre_tool_call        → opens delegate_task's span before the tool runs
+    * subagent_start       → links each sub-agent's turn to that span
 
     ``pre_llm_call`` and ``transform_llm_output`` are read-only observers (the
     latter returns ``None`` and never alters the output); together they put the
@@ -538,6 +749,8 @@ def register(ctx) -> None:
     ctx.register_hook("transform_llm_output", on_transform_llm_output)
     ctx.register_hook("post_api_request", on_post_api_request)
     ctx.register_hook("post_tool_call", on_post_tool_call)
+    ctx.register_hook("pre_tool_call", on_pre_tool_call)
+    ctx.register_hook("subagent_start", on_subagent_start)
 
 
 def reset_for_tests() -> None:
@@ -549,5 +762,9 @@ def reset_for_tests() -> None:
     with _OPEN_TURNS_LOCK:
         _OPEN_TURNS.clear()
         _OPEN_TURN_SPANS.clear()
+    with _LINKS_LOCK:
+        _DELEGATIONS.clear()
+        _LATEST_DELEGATION.clear()
+        _CHILD_LINKS.clear()
     with _ACTIVE_SESSION_LOCK:
         _ACTIVE_SESSION_ID = "default"

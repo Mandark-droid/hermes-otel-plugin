@@ -76,6 +76,8 @@ class TestManifest:
             "transform_llm_output",
             "post_api_request",
             "post_tool_call",
+            "pre_tool_call",
+            "subagent_start",
         }
 
 
@@ -567,6 +569,8 @@ class TestPluginAdapter:
             "transform_llm_output",
             "post_api_request",
             "post_tool_call",
+            "pre_tool_call",
+            "subagent_start",
         }
 
     def test_prompt_and_response_stamped_for_eval(self, exporter_and_tracer, monkeypatch):
@@ -898,3 +902,179 @@ class TestPluginAdapter:
             for r in log_exporter.get_finished_logs()
         ]
         assert any(r.get("event.name") == EVENT_USER_PROMPT for r in records)
+
+
+# ---------------------------------------------------------------------------
+# Sub-agent linkage: delegate_task -> child invoke_agent
+# ---------------------------------------------------------------------------
+
+
+def _wired_plugin(tracer, monkeypatch):
+    plugin, provider = _fresh_plugin()
+    monkeypatch.setattr(provider, "build_tracer", lambda **_: tracer)
+    _log_exporter, otel_logger = _in_memory_logger()
+    monkeypatch.setattr(provider, "build_logger", lambda **_: otel_logger)
+    ctx = _FakeCtx()
+    plugin.register(ctx)
+    return ctx
+
+
+_GOALS = ["read alpha.txt", "read beta.txt"]
+
+
+def _run_child(hooks, child_sid, goal, *, fail=False):
+    """One sub-agent run as Hermes fires it: its own session, parent named on pre_llm_call."""
+    hooks["pre_llm_call"](session_id=child_sid, parent_session_id="parent", user_message=goal, model="m")
+    hooks["post_api_request"](session_id=child_sid, model="m", usage={"input_tokens": 5, "output_tokens": 1})
+    hooks["post_tool_call"](
+        session_id=child_sid,
+        tool_name="terminal",
+        args={"command": "cat x"},
+        result="boom" if fail else "ok",
+        status="error" if fail else "ok",
+        duration_ms=5,
+    )
+    if not fail:  # a failed child never delivers a final response
+        hooks["transform_llm_output"](session_id=child_sid, response_text="contents")
+    hooks["on_session_end"](session_id=child_sid)
+
+
+def _delegate(hooks, *, children, start_order=(0, 1), fail_index=None):
+    """Parent turn that calls delegate_task; children run on worker threads like Hermes's pool."""
+    import threading
+
+    hooks["on_session_start"](session_id="parent", model="m")
+    hooks["pre_llm_call"](session_id="parent", user_message="delegate two reads", model="m")
+    args = {"tasks": [{"goal": g, "context": "scratch"} for g in _GOALS]}
+    directive = hooks["pre_tool_call"](tool_name="delegate_task", args=args, session_id="parent", tool_call_id="call-1")
+    assert directive is None  # never a block/approve/modify directive
+    for i in start_order:  # built on the delegating thread
+        hooks["subagent_start"](parent_session_id="parent", child_session_id=children[i], child_goal=_GOALS[i])
+    runs = [
+        threading.Thread(target=_run_child, args=(hooks, children[i], _GOALS[i]), kwargs={"fail": i == fail_index})
+        for i in range(len(children))
+    ]
+    for t in runs:
+        t.start()
+    for t in runs:
+        t.join()
+    hooks["post_tool_call"](
+        session_id="parent",
+        tool_call_id="call-1",
+        tool_name="delegate_task",
+        args=args,
+        result="{\"results\": []}",
+        status="error" if fail_index is not None else "ok",
+        duration_ms=1000,
+    )
+    hooks["transform_llm_output"](session_id="parent", response_text="both read")
+    hooks["on_session_end"](session_id="parent")
+
+
+def _spans_of(exporter):
+    spans = exporter.get_finished_spans()
+    invokes = {s.attributes.get("session.id"): s for s in spans if s.name == OP_INVOKE_AGENT}
+    delegate = [s for s in spans if s.attributes.get("gen_ai.tool.name") == "delegate_task"]
+    return spans, invokes, delegate
+
+
+class TestSubagentLinkage:
+    def test_parallel_children_are_children_of_the_delegate_task_span(self, exporter_and_tracer, monkeypatch):
+        monkeypatch.delenv("HERMES_OTEL_CAPTURE_CONTENT", raising=False)
+        exporter, tracer = exporter_and_tracer
+        hooks = _wired_plugin(tracer, monkeypatch).hooks
+        children = ["child-a", "child-b"]
+        # Started in reverse order: the task index must come from the goal, not the order.
+        _delegate(hooks, children=children, start_order=(1, 0))
+
+        spans, invokes, delegate = _spans_of(exporter)
+        assert len(delegate) == 1, "delegate_task must be one span, opened before and closed after the tool"
+        tool = delegate[0]
+        parent_turn = invokes["parent"]
+        assert tool.parent.span_id == parent_turn.context.span_id
+        assert list(tool.attributes["hermes.delegation.child_session_ids"]) == ["child-b", "child-a"]
+        for index, child_sid in enumerate(children):
+            child_turn = invokes[child_sid]
+            assert child_turn.parent is not None and child_turn.parent.span_id == tool.context.span_id
+            assert child_turn.context.trace_id == parent_turn.context.trace_id
+            assert child_turn.attributes["hermes.parent_session_id"] == "parent"
+            assert child_turn.attributes["hermes.delegation.task_index"] == index
+            # Every span of the child carries the link and nests in the one trace.
+            child_spans = [s for s in spans if s.parent is not None and s.parent.span_id == child_turn.context.span_id]
+            assert {s.name for s in child_spans} == {OP_CHAT, OP_EXECUTE_TOOL}
+            for s in child_spans:
+                assert s.context.trace_id == parent_turn.context.trace_id
+                assert s.attributes["hermes.parent_session_id"] == "parent"
+                assert s.attributes["hermes.delegation.task_index"] == index
+        # The parent's own spans are not marked as a sub-agent's.
+        assert "hermes.parent_session_id" not in parent_turn.attributes
+        assert "hermes.parent_session_id" not in tool.attributes
+
+    def test_content_capture_off_still_links_but_carries_no_content(self, exporter_and_tracer, monkeypatch):
+        monkeypatch.delenv("HERMES_OTEL_CAPTURE_CONTENT", raising=False)
+        exporter, tracer = exporter_and_tracer
+        hooks = _wired_plugin(tracer, monkeypatch).hooks
+        _delegate(hooks, children=["c1", "c2"])
+        _spans, invokes, delegate = _spans_of(exporter)
+        tool = delegate[0]
+        assert "gen_ai.tool.arguments" not in tool.attributes
+        assert "gen_ai.tool.result" not in tool.attributes
+        assert "gen_ai.prompt" not in invokes["c1"].attributes
+        assert list(tool.attributes["hermes.delegation.child_session_ids"]) == ["c1", "c2"]
+        assert invokes["c2"].attributes["hermes.delegation.task_index"] == 1
+
+    def test_content_capture_on_keeps_arguments_on_the_delegate_span(self, exporter_and_tracer, monkeypatch):
+        monkeypatch.setenv("HERMES_OTEL_CAPTURE_CONTENT", "true")
+        exporter, tracer = exporter_and_tracer
+        hooks = _wired_plugin(tracer, monkeypatch).hooks
+        _delegate(hooks, children=["c1", "c2"])
+        _spans, invokes, delegate = _spans_of(exporter)
+        assert "read beta.txt" in delegate[0].attributes["gen_ai.tool.arguments"]
+        assert invokes["c2"].attributes["gen_ai.prompt"] == "read beta.txt"
+
+    def test_a_failed_child_is_still_linked_and_the_delegate_span_records_the_error(
+        self, exporter_and_tracer, monkeypatch
+    ):
+        exporter, tracer = exporter_and_tracer
+        hooks = _wired_plugin(tracer, monkeypatch).hooks
+        _delegate(hooks, children=["ok-child", "bad-child"], fail_index=1)
+        spans, invokes, delegate = _spans_of(exporter)
+        tool = delegate[0]
+        bad = invokes["bad-child"]  # closed by on_session_end, no final response
+        assert bad.parent.span_id == tool.context.span_id
+        assert bad.attributes["hermes.delegation.task_index"] == 1
+        bad_tool = next(
+            s for s in spans if s.name == OP_EXECUTE_TOOL and s.parent and s.parent.span_id == bad.context.span_id
+        )
+        assert bad_tool.attributes["error.type"] == "error"
+        assert tool.attributes["error.type"] == "error"
+        assert list(tool.attributes["hermes.delegation.child_session_ids"]) == ["ok-child", "bad-child"]
+
+    def test_child_without_subagent_start_still_names_its_parent(self, exporter_and_tracer, monkeypatch):
+        """If the link was never announced, the parent id Hermes puts on pre_llm_call is still stamped."""
+        exporter, tracer = exporter_and_tracer
+        hooks = _wired_plugin(tracer, monkeypatch).hooks
+        _run_child(hooks, "orphan", "read alpha.txt")
+        _spans, invokes, _delegate_spans = _spans_of(exporter)
+        orphan = invokes["orphan"]
+        assert orphan.attributes["hermes.parent_session_id"] == "parent"
+        assert "hermes.delegation.task_index" not in orphan.attributes
+
+    def test_other_tools_are_untouched_by_pre_tool_call(self, exporter_and_tracer, monkeypatch):
+        exporter, tracer = exporter_and_tracer
+        hooks = _wired_plugin(tracer, monkeypatch).hooks
+        hooks["pre_llm_call"](session_id="s", user_message="hi")
+        assert hooks["pre_tool_call"](tool_name="terminal", args={}, session_id="s", tool_call_id="t") is None
+        hooks["post_tool_call"](session_id="s", tool_call_id="t", tool_name="terminal", result="ok", duration_ms=3)
+        hooks["transform_llm_output"](session_id="s", response_text="done")
+        tools = [s for s in exporter.get_finished_spans() if s.name == OP_EXECUTE_TOOL]
+        assert len(tools) == 1 and tools[0].attributes["gen_ai.tool.name"] == "terminal"
+
+    def test_unfinished_delegate_span_is_closed_when_the_parent_session_ends(self, exporter_and_tracer, monkeypatch):
+        exporter, tracer = exporter_and_tracer
+        hooks = _wired_plugin(tracer, monkeypatch).hooks
+        hooks["pre_llm_call"](session_id="p", user_message="go")
+        hooks["pre_tool_call"](tool_name="delegate_task", args={"goal": "x"}, session_id="p", tool_call_id="c")
+        hooks["on_session_end"](session_id="p")  # interrupted: post_tool_call never fires
+        _spans, _invokes, delegate = _spans_of(exporter)
+        assert len(delegate) == 1
