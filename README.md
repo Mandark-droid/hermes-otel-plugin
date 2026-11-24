@@ -158,6 +158,19 @@ content, so it is emitted with content capture off):
 | `hermes.delegation.task_index` | every span of a sub-agent | its index in `delegate_task`'s `tasks` |
 | `hermes.delegation.child_session_ids` | the parent's `delegate_task` span | the sub-agents' session ids |
 
+**Gateway bot and profile (since v2.2.0).** Two attributes on the OTel
+**resource** of everything the plugin emits, spans and log records, sub-agents
+included, so a backend can tell a Hermes messaging-gateway bot from a CLI session:
+
+| Attribute | Present | Value |
+|---|---|---|
+| `hermes.gateway.platform` | only on runs driven by the messaging gateway | the platform, e.g. `slack`, `telegram`, `discord` |
+| `hermes.bot.profile` | whenever the profile name is known | the Hermes profile, e.g. `default`, `ops-bot` |
+
+A CLI session on the same profile has `hermes.bot.profile` but no
+`hermes.gateway.platform`. A profile whose home Hermes cannot name (`custom`) is
+left out rather than guessed.
+
 `gen_ai.system = hermes` on every span; `service.name` defaults to
 `agent.coding.hermes`. Spans and dashboard log records are emitted in parallel
 (a logs failure never disables spans). Identity (`service.name`, `user.id`, and

@@ -4,6 +4,30 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [2.2.0] - 2026-11-24
+
+### Added
+- **Gateway bot runs are told apart from CLI runs.** Two resource attributes, on
+  every span and every log record of a run, sub-agents included:
+  `hermes.gateway.platform` (`slack`, `telegram`, `discord`, ...) is present only
+  when the messaging gateway drives the run, and `hermes.bot.profile` is the Hermes
+  profile name whenever it is known. A CLI session never carries a platform, even
+  on the same profile. Both are read from Hermes itself (the gateway's
+  `HERMES_SESSION_PLATFORM` / `HERMES_SESSION_PROFILE` session variables, then the
+  profile derived from the Hermes home), not from a process name.
+- A sub-agent takes its delegating run's identity, read on the delegating thread,
+  because Hermes runs sub-agents on worker threads that do not carry the gateway's
+  context.
+
+### Changed
+- The plugin builds one tracer and logger provider per run identity (gateway
+  platform, profile), on first use, because a resource belongs to a provider. A CLI
+  process still builds one pair; a gateway serving two platforms builds two.
+- A run that carries a gateway platform uses the plain OpenTelemetry SDK provider
+  even when `genai-otel-instrument` is installed, since that library owns one
+  process-wide resource. A profile alone still goes through it.
+- `provider.build_tracer` / `build_logger` accept `extra_resource`.
+
 ## [2.1.0] - 2026-11-18
 
 ### Added

@@ -1,0 +1,75 @@
+# SPDX-License-Identifier: MIT
+"""Who is driving this Hermes run: which gateway platform, and which profile.
+
+Two facts are read from Hermes itself, never guessed from a process name:
+
+* **Gateway platform.** The messaging gateway binds the platform of the turn it is
+  serving (``slack``, ``telegram``, ``discord``, ...) as the ContextVar-backed
+  session variable ``HERMES_SESSION_PLATFORM`` (``gateway/session_context.py``,
+  bound by ``GatewayRunner._set_session_env`` in ``gateway/run.py``). The CLI, TUI
+  and desktop never bind it (they bind ``HERMES_SESSION_SOURCE``), so an empty value
+  means "not a gateway run". Read through ``get_session_env`` so the ContextVar wins
+  over ``os.environ``.
+* **Profile.** ``HERMES_SESSION_PROFILE`` when the gateway routes the chat to a named
+  profile; otherwise ``hermes_cli.profiles.get_active_profile_name()``, which derives
+  the name from the (context-aware) Hermes home. A profile whose home is not under
+  ``~/.hermes/profiles`` reports ``custom``: that is "unknown", so it is omitted.
+
+Both imports are Hermes' own and are only available inside a Hermes process; outside
+one (or if Hermes moves them) this returns nothing and the plugin emits as before.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import NamedTuple
+
+logger = logging.getLogger(__name__)
+
+ATTR_GATEWAY_PLATFORM = "hermes.gateway.platform"
+ATTR_BOT_PROFILE = "hermes.bot.profile"
+
+# The CLI never binds a platform; "cli" is what Hermes itself substitutes when none is bound.
+_NOT_A_GATEWAY = frozenset({"", "cli"})
+# get_active_profile_name() answers this for a home it cannot name.
+_UNNAMED_PROFILE = "custom"
+
+
+class RunIdentity(NamedTuple):
+    """The resource-level identity of a run. ``None`` means "not known / not applicable"."""
+
+    platform: str | None = None
+    profile: str | None = None
+
+    def resource_attributes(self) -> dict[str, str]:
+        attrs: dict[str, str] = {}
+        if self.platform:
+            attrs[ATTR_GATEWAY_PLATFORM] = self.platform
+        if self.profile:
+            attrs[ATTR_BOT_PROFILE] = self.profile
+        return attrs
+
+
+def detect_run_identity() -> RunIdentity:
+    """Read the identity of the run on the calling thread/context. Never raises."""
+    platform: str | None = None
+    session_profile = ""
+    try:
+        from gateway.session_context import get_session_env  # type: ignore[import-not-found]
+
+        value = str(get_session_env("HERMES_SESSION_PLATFORM", "") or "").strip().lower()
+        platform = None if value in _NOT_A_GATEWAY else value
+        session_profile = str(get_session_env("HERMES_SESSION_PROFILE", "") or "").strip()
+    except Exception:
+        logger.debug("gateway session context unavailable", exc_info=True)
+
+    profile = session_profile or None
+    if profile is None:
+        try:
+            from hermes_cli.profiles import get_active_profile_name  # type: ignore[import-not-found]
+
+            name = str(get_active_profile_name() or "").strip()
+            profile = None if name in ("", _UNNAMED_PROFILE) else name
+        except Exception:
+            logger.debug("hermes profile unavailable", exc_info=True)
+    return RunIdentity(platform, profile)
