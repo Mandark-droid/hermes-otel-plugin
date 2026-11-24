@@ -1197,6 +1197,31 @@ class TestRunIdentity:
             assert "hermes.gateway.platform" not in resource
             assert resource["hermes.bot.profile"] == "founder-bot"
 
+    @pytest.mark.parametrize("surface", ["local", "api_server", "webhook", "desktop", "tui", "cli"])
+    def test_non_messaging_surface_is_not_a_gateway_run(self, hermes_identity, monkeypatch, surface):
+        # A `hermes chat` turn runs inside the gateway process but on a non-messaging surface: not a bot.
+        monkeypatch.delenv("HERMES_OTEL_CAPTURE_CONTENT", raising=False)
+        hermes_identity.update(platform=surface, home_profile="founder-bot")
+        hooks, spans, logs = _real_pipelines(monkeypatch)
+
+        _delegate(hooks, children=["child-a", "child-b"])
+
+        resources = _span_resources(spans) + _log_resources(logs)
+        assert resources
+        for resource in resources:
+            assert "hermes.gateway.platform" not in resource
+
+    def test_hermes_own_non_messaging_set_wins(self, hermes_identity, monkeypatch):
+        import sys as _sys
+
+        from identity import detect_run_identity
+
+        _sys.modules["gateway.session_context"].NON_MESSAGING_SESSION_SURFACES = frozenset({"", "matrix"})
+        hermes_identity.update(platform="matrix")
+        assert detect_run_identity().platform is None
+        hermes_identity.update(platform="local")  # not in Hermes' (hypothetical) set, so it counts
+        assert detect_run_identity().platform == "local"
+
     def test_one_process_serving_two_platforms_keeps_each_run_apart(self, hermes_identity, monkeypatch):
         hooks, spans, _logs = _real_pipelines(monkeypatch)
         for sid, platform in (("s-slack", "slack"), ("s-tg", "telegram")):

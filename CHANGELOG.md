@@ -15,6 +15,10 @@ All notable changes to this project are documented here. The format follows
   on the same profile. Both are read from Hermes itself (the gateway's
   `HERMES_SESSION_PLATFORM` / `HERMES_SESSION_PROFILE` session variables, then the
   profile derived from the Hermes home), not from a process name.
+- Only a human chat channel counts as a gateway run. A turn on a non-messaging surface (`local`, `api_server`,
+  `webhook`, `desktop`, `tui`, `cli`, ...) carries no `hermes.gateway.platform`, even though the gateway process
+  serves it: a `hermes chat` turn is not a bot conversation. The set is Hermes' own
+  `NON_MESSAGING_SESSION_SURFACES`, with a copy as fallback.
 - A sub-agent takes its delegating run's identity, read on the delegating thread,
   because Hermes runs sub-agents on worker threads that do not carry the gateway's
   context.

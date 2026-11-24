@@ -29,8 +29,23 @@ logger = logging.getLogger(__name__)
 ATTR_GATEWAY_PLATFORM = "hermes.gateway.platform"
 ATTR_BOT_PROFILE = "hermes.bot.profile"
 
-# The CLI never binds a platform; "cli" is what Hermes itself substitutes when none is bound.
-_NOT_A_GATEWAY = frozenset({"", "cli"})
+# Surfaces that are not a human chat channel, so a run on them is not a bot conversation even when the gateway
+# process serves it (a `hermes chat` turn, the desktop app, the API server, a webhook). Hermes' own definition,
+# gateway.session_context.NON_MESSAGING_SESSION_SURFACES, is used when it can be imported; this copy (Hermes
+# v0.23.x) is the fallback.
+_NON_MESSAGING_FALLBACK = frozenset({
+    "", "api_server", "cli", "codex", "desktop", "gateway", "kanban", "local",
+    "msgraph_webhook", "tool", "tui", "webhook",
+})
+
+
+def _non_messaging_surfaces() -> frozenset[str]:
+    try:
+        from gateway.session_context import NON_MESSAGING_SESSION_SURFACES  # type: ignore[import-not-found]
+
+        return frozenset(NON_MESSAGING_SESSION_SURFACES)
+    except Exception:
+        return _NON_MESSAGING_FALLBACK
 # get_active_profile_name() answers this for a home it cannot name.
 _UNNAMED_PROFILE = "custom"
 
@@ -58,7 +73,7 @@ def detect_run_identity() -> RunIdentity:
         from gateway.session_context import get_session_env  # type: ignore[import-not-found]
 
         value = str(get_session_env("HERMES_SESSION_PLATFORM", "") or "").strip().lower()
-        platform = None if value in _NOT_A_GATEWAY else value
+        platform = None if value in _non_messaging_surfaces() else value
         session_profile = str(get_session_env("HERMES_SESSION_PROFILE", "") or "").strip()
     except Exception:
         logger.debug("gateway session context unavailable", exc_info=True)
