@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [2.2.1] - 2026-11-24
+
+### Fixed
+- **The plugin can be enabled in several Hermes profiles at once.** Hermes builds one shared uv workspace for every
+  profile's plugins and keeps a buildable plugin's declared name, so the same plugin in two profiles failed `uv lock`
+  ("two workspace members are both named `hermes-otel-plugin`") and Hermes disabled it in every profile, while a
+  plugin with no build system is renamed per profile. `pyproject.toml` no longer declares `[build-system]`.
+  `pip install git+https://github.com/Mandark-droid/hermes-otel-plugin.git` and `python -m build` still work: they
+  fall back to setuptools (PEP 517), and the wheel keeps the `hermes_agent.plugins` entry point.
+
 ## [2.2.0] - 2026-11-24
 
 ### Added

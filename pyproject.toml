@@ -1,10 +1,12 @@
-[build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
+# No [build-system] table, on purpose. Hermes builds one shared uv workspace for every profile's plugins and renames
+# a plugin that has no build system ("virtual") per profile; a buildable plugin keeps its declared name, so the same
+# plugin enabled in two Hermes profiles failed `uv lock` with "two workspace members are both named
+# hermes-otel-plugin" and Hermes disabled it. pip and `python -m build` still work: without the table they fall back
+# to setuptools (PEP 517), which reads [project] and [tool.setuptools] below.
 
 [project]
 name = "hermes-otel-plugin"
-version = "2.2.0"
+version = "2.2.1"
 description = "OpenTelemetry (OTLP) observability plugin for the Hermes agent — GenAI-convention spans, dashboard-shaped log records, and local-model cost estimation."
 readme = "README.md"
 license = { text = "MIT" }
