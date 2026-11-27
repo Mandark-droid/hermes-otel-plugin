@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **A scheduled run that reports to a chat channel is a bot run.** A Hermes cron run binds no session platform, so
+  until now it never carried `hermes.gateway.platform`. When the run is a cron run (`HERMES_CRON_SESSION`) and its
+  job delivers to a messaging platform (`HERMES_CRON_AUTO_DELIVER_PLATFORM`, for example `slack`), the resource now
+  carries `hermes.gateway.platform` = that platform and a new `hermes.run.trigger` = `cron`, sub-agents included.
+  A cron job that delivers locally or to a webhook stays as before, with neither attribute.
+
 ## [2.2.1] - 2026-11-24
 
 ### Fixed

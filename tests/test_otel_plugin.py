@@ -1094,10 +1094,12 @@ def hermes_identity(monkeypatch):
     """
     import types
 
-    state = {"platform": "", "session_profile": "", "home_profile": "default"}
+    state = {"platform": "", "session_profile": "", "home_profile": "default", "cron": "", "cron_deliver": ""}
     session_vars = {
         "HERMES_SESSION_PLATFORM": "platform",
         "HERMES_SESSION_PROFILE": "session_profile",
+        "HERMES_CRON_SESSION": "cron",
+        "HERMES_CRON_AUTO_DELIVER_PLATFORM": "cron_deliver",
     }
     gateway = types.ModuleType("gateway")
     session_context = types.ModuleType("gateway.session_context")
@@ -1263,3 +1265,44 @@ class TestRunIdentity:
         assert resources
         for resource in resources:
             assert "hermes.gateway.platform" not in resource and "hermes.bot.profile" not in resource
+
+
+class TestCronRunIdentity:
+    """A scheduled (cron) run that delivers to a chat platform is a bot run (2.3.0)."""
+
+    def test_cron_run_delivering_to_slack_is_bot(self, hermes_identity, monkeypatch):
+        monkeypatch.delenv("HERMES_OTEL_CAPTURE_CONTENT", raising=False)
+        hermes_identity.update(cron="1", cron_deliver="slack", home_profile="scout-bot")
+        hooks, spans, logs = _real_pipelines(monkeypatch)
+
+        _delegate(hooks, children=["child-a", "child-b"])
+
+        resources = _span_resources(spans) + _log_resources(logs)
+        assert resources
+        for resource in resources:
+            assert resource["hermes.gateway.platform"] == "slack"
+            assert resource["hermes.run.trigger"] == "cron"
+            assert resource["hermes.bot.profile"] == "scout-bot"
+
+    @pytest.mark.parametrize("deliver", ["", "local", "webhook"])
+    def test_cron_run_without_chat_delivery_is_not_bot(self, hermes_identity, deliver):
+        from identity import detect_run_identity
+
+        hermes_identity.update(cron="1", cron_deliver=deliver)
+        ident = detect_run_identity()
+        assert ident.platform is None
+        assert "hermes.run.trigger" not in ident.resource_attributes()
+
+    def test_chat_turn_unchanged(self, hermes_identity):
+        from identity import detect_run_identity
+
+        hermes_identity.update(platform="slack")
+        attrs = detect_run_identity().resource_attributes()
+        assert attrs["hermes.gateway.platform"] == "slack"
+        assert "hermes.run.trigger" not in attrs
+
+    def test_delivery_platform_without_cron_session_ignored(self, hermes_identity):
+        from identity import detect_run_identity
+
+        hermes_identity.update(cron="", cron_deliver="slack")
+        assert detect_run_identity().platform is None

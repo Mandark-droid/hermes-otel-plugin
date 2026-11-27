@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 ATTR_GATEWAY_PLATFORM = "hermes.gateway.platform"
 ATTR_BOT_PROFILE = "hermes.bot.profile"
+ATTR_RUN_TRIGGER = "hermes.run.trigger"
 
 # Surfaces that are not a human chat channel, so a run on them is not a bot conversation even when the gateway
 # process serves it (a `hermes chat` turn, the desktop app, the API server, a webhook). Hermes' own definition,
@@ -55,6 +56,7 @@ class RunIdentity(NamedTuple):
 
     platform: str | None = None
     profile: str | None = None
+    trigger: str | None = None
 
     def resource_attributes(self) -> dict[str, str]:
         attrs: dict[str, str] = {}
@@ -62,12 +64,15 @@ class RunIdentity(NamedTuple):
             attrs[ATTR_GATEWAY_PLATFORM] = self.platform
         if self.profile:
             attrs[ATTR_BOT_PROFILE] = self.profile
+        if self.trigger:
+            attrs[ATTR_RUN_TRIGGER] = self.trigger
         return attrs
 
 
 def detect_run_identity() -> RunIdentity:
     """Read the identity of the run on the calling thread/context. Never raises."""
     platform: str | None = None
+    trigger: str | None = None
     session_profile = ""
     try:
         from gateway.session_context import get_session_env  # type: ignore[import-not-found]
@@ -75,6 +80,12 @@ def detect_run_identity() -> RunIdentity:
         value = str(get_session_env("HERMES_SESSION_PLATFORM", "") or "").strip().lower()
         platform = None if value in _non_messaging_surfaces() else value
         session_profile = str(get_session_env("HERMES_SESSION_PROFILE", "") or "").strip()
+        if platform is None and str(get_session_env("HERMES_CRON_SESSION", "") or "").strip() == "1":
+            # A scheduled run binds no session platform, but it delivers to one: a cron job that reports to a
+            # chat channel is a bot run. Local or webhook delivery stays a non-bot run, as before.
+            deliver = str(get_session_env("HERMES_CRON_AUTO_DELIVER_PLATFORM", "") or "").strip().lower()
+            if deliver and deliver not in _non_messaging_surfaces():
+                platform, trigger = deliver, "cron"
     except Exception:
         logger.debug("gateway session context unavailable", exc_info=True)
 
@@ -87,4 +98,4 @@ def detect_run_identity() -> RunIdentity:
             profile = None if name in ("", _UNNAMED_PROFILE) else name
         except Exception:
             logger.debug("hermes profile unavailable", exc_info=True)
-    return RunIdentity(platform, profile)
+    return RunIdentity(platform, profile, trigger)
