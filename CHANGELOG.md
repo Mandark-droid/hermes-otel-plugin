@@ -12,6 +12,31 @@ All notable changes to this project are documented here. The format follows
   job delivers to a messaging platform (`HERMES_CRON_AUTO_DELIVER_PLATFORM`, for example `slack`), the resource now
   carries `hermes.gateway.platform` = that platform and a new `hermes.run.trigger` = `cron`, sub-agents included.
   A cron job that delivers locally or to a webhook stays as before, with neither attribute.
+- Prompt-cache token buckets. `chat` spans carry
+  `gen_ai.usage.cache_read.input_tokens` and
+  `gen_ai.usage.cache_creation.input_tokens`, and `api_response` records carry
+  `cache_read_tokens` / `cache_creation_tokens` (Claude Code's names). Read from
+  Hermes' normalized usage (`cache_read_tokens` / `cache_write_tokens`) or raw
+  Anthropic usage. Before this, cache-heavy Anthropic sessions reported only the
+  uncached `input_tokens`, so input looked near zero. For Anthropic-style usage
+  `gen_ai.usage.input_tokens` excludes the cache buckets, which are reported
+  separately as `gen_ai.usage.cache_read.input_tokens` and
+  `gen_ai.usage.cache_creation.input_tokens`; total prompt tokens is the sum of
+  the three.
+
+### Fixed
+- Response text was never captured on Hermes v0.22+. `post_api_request` now
+  passes `assistant_message` (object or dict, content as a string or content
+  blocks) instead of `assistant_response`; the plugin reads either, so `chat`
+  spans get `gen_ai.completion` and `api_response` records get a body again
+  when content capture is on.
+- Tool error text no longer leaves the process when content capture is off.
+  `tool_result` records keep `status_code` and `error_type` but only carry
+  `error` when `HERMES_OTEL_CAPTURE_CONTENT` is true. `execute_tool` spans set
+  `error.type` to the exception class (or the error string itself, such as the
+  short status a failed delegated task passes) and only record the exception
+  event / `error.message` when capture is on. Error text
+  often quotes tool input or output (paths, file contents, API responses).
 
 ## [2.2.1] - 2026-11-24
 

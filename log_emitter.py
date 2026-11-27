@@ -229,6 +229,8 @@ class OtelLogEmitter:
         finish_reasons: Sequence[str] | None = None,
         ttft_ms: float | None = None,
         response_text: str | None = None,
+        cache_read_tokens: int | None = None,
+        cache_creation_tokens: int | None = None,
     ) -> None:
         """Emit one ``api_response`` record per LLM call.
 
@@ -242,6 +244,16 @@ class OtelLogEmitter:
             "output_tokens": _as_int(output_tokens),
             "cost_usd": _as_float(cost_usd),
         }
+        # Prompt-cache buckets, named like Claude Code's api_request event.
+        # ``input_tokens`` excludes them (Anthropic-style), so without these a
+        # cache-heavy session looks like it sent almost no input.
+        for key, value in (
+            ("cache_read_tokens", cache_read_tokens),
+            ("cache_creation_tokens", cache_creation_tokens),
+        ):
+            as_int = _as_int(value)
+            if as_int is not None:
+                attrs[key] = as_int
         if finish_reasons:
             attrs["finish_reason"] = next(iter(finish_reasons))
         ttft = _as_float(ttft_ms)
@@ -280,8 +292,11 @@ class OtelLogEmitter:
             "decision_source": "agent",
         }
         if not ok:
-            attrs["error"] = _safe_str(error if isinstance(error, str) else repr(error))
             attrs["error_type"] = type(error).__name__ if isinstance(error, BaseException) else "ToolError"
+            # Error text often quotes tool input/output (paths, file contents,
+            # API responses), so it is content and follows capture_content.
+            if self._capture_content:
+                attrs["error"] = _safe_str(error if isinstance(error, str) else repr(error))
         if self._capture_content and arguments is not None:
             attrs["tool_input"] = _safe_str(arguments)
         if self._capture_content and result is not None:
