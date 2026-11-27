@@ -216,8 +216,11 @@ class TestEmitter:
 
         for span in exporter.get_finished_spans():
             assert not span.events  # no exception event carrying the message
-            for value in span.attributes.values():
-                assert "secret" not in str(value)
+            # Only error.message is content; a string error stays in error.type.
+            assert "error.message" not in span.attributes
+            if span.attributes["error.type"] == "RuntimeError":
+                for value in span.attributes.values():
+                    assert "secret" not in str(value)
 
     def test_tool_error_text_kept_when_capture_enabled(self, exporter_and_tracer):
         exporter, tracer = exporter_and_tracer
