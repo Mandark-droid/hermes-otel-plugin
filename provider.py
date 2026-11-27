@@ -40,6 +40,37 @@ INSTRUMENTATION_SCOPE = "hermes.observability.otel"
 # puts each turn's telemetry on the wire while the process is still alive.
 _TRACER_PROVIDER: Any | None = None
 _LOGGER_PROVIDER: Any | None = None
+# One provider pair is built per distinct run identity (gateway platform, profile),
+# because identity lives on the resource and a resource belongs to a provider. All
+# of them must be flushed at turn end.
+_TRACER_PROVIDERS: list[Any] = []
+_LOGGER_PROVIDERS: list[Any] = []
+
+
+def _make_span_exporter(endpoint: str) -> Any:
+    """OTLP HTTP span exporter for ``endpoint`` (a seam: tests swap in an in-memory one)."""
+    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+
+    return OTLPSpanExporter(endpoint=endpoint.rstrip("/") + "/v1/traces")
+
+
+def _make_log_exporter(endpoint: str) -> Any:
+    """OTLP HTTP log exporter for ``endpoint`` (a seam, like ``_make_span_exporter``)."""
+    from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+
+    return OTLPLogExporter(endpoint=endpoint.rstrip("/") + "/v1/logs")
+
+
+def _span_processor(exporter: Any) -> Any:
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+    return BatchSpanProcessor(exporter)
+
+
+def _log_processor(exporter: Any) -> Any:
+    from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+
+    return BatchLogRecordProcessor(exporter)
 
 
 def flush_all(timeout_millis: int = 3000) -> None:
@@ -57,7 +88,12 @@ def flush_all(timeout_millis: int = 3000) -> None:
             tracer_provider = trace.get_tracer_provider()
         except Exception:  # pragma: no cover - defensive
             tracer_provider = None
-    for provider in (tracer_provider, _LOGGER_PROVIDER):
+    providers = [tracer_provider, *_TRACER_PROVIDERS, *_LOGGER_PROVIDERS]
+    seen: set[int] = set()
+    for provider in providers:
+        if provider is None or id(provider) in seen:
+            continue
+        seen.add(id(provider))
         flush = getattr(provider, "force_flush", None)
         if flush is None:
             continue
@@ -73,8 +109,12 @@ def build_tracer(
     otlp_endpoint: str | None = None,
     user_id: str | None = None,
     capture_content: bool = False,
+    extra_resource: dict[str, str] | None = None,
 ) -> Any:
     """Return an OpenTelemetry ``Tracer`` for the plugin.
+
+    ``extra_resource`` is merged onto the resource of the provider built here
+    (the run identity: ``hermes.gateway.platform`` / ``hermes.bot.profile``).
 
     Resolves ``service_name`` / ``otlp_endpoint`` from arguments first, then
     standard OTel env vars, then sane on-prem defaults. Never raises on
@@ -92,15 +132,26 @@ def build_tracer(
         or DEFAULT_OTLP_ENDPOINT
     )
 
-    tracer = _try_genai_otel(
-        service_name=service_name,
-        otlp_endpoint=otlp_endpoint,
-        user_id=user_id,
-        capture_content=capture_content,
-    )
+    extra = dict(extra_resource or {})
+    # genai-otel-instrument owns one process-wide provider, so its resource cannot
+    # differ per run. A run that carries a gateway platform needs its own resource,
+    # so it takes the plain SDK path; a profile alone is process-constant and rides
+    # on OTEL_RESOURCE_ATTRIBUTES.
+    tracer = None
+    if "hermes.gateway.platform" not in extra:
+        for key, value in extra.items():
+            _add_resource_attr(key, value)
+        tracer = _try_genai_otel(
+            service_name=service_name,
+            otlp_endpoint=otlp_endpoint,
+            user_id=user_id,
+            capture_content=capture_content,
+        )
     if tracer is not None:
         return tracer
-    return _build_plain_otel(service_name=service_name, otlp_endpoint=otlp_endpoint)
+    return _build_plain_otel(
+        service_name=service_name, otlp_endpoint=otlp_endpoint, extra_resource=extra
+    )
 
 
 def _add_resource_attr(key: str, value: str) -> None:
@@ -162,36 +213,36 @@ def _try_genai_otel(
         return None
 
 
-def _build_plain_otel(*, service_name: str, otlp_endpoint: str) -> Any:
+def _build_plain_otel(
+    *, service_name: str, otlp_endpoint: str, extra_resource: dict[str, str] | None = None
+) -> Any:
     """Fallback path: vanilla OTel SDK + OTLP HTTP exporter."""
     try:
         from opentelemetry import trace
-        from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
-            OTLPSpanExporter,
-        )
         from opentelemetry.sdk.resources import Resource
         from opentelemetry.sdk.trace import TracerProvider
-        from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
         resource = Resource.create(
             {
                 "service.name": service_name,
                 "gen_ai.system": "hermes",
+                **(extra_resource or {}),
             }
         )
         provider = TracerProvider(resource=resource)
-        # OTLP HTTP traces endpoint convention is <endpoint>/v1/traces.
-        exporter = OTLPSpanExporter(
-            endpoint=otlp_endpoint.rstrip("/") + "/v1/traces"
-        )
-        provider.add_span_processor(BatchSpanProcessor(exporter))
+        provider.add_span_processor(_span_processor(_make_span_exporter(otlp_endpoint)))
         global _TRACER_PROVIDER
         _TRACER_PROVIDER = provider
+        _TRACER_PROVIDERS.append(provider)
         # Only set the global provider if one is not already configured, to
         # avoid clobbering a host application's tracing setup.
         current = trace.get_tracer_provider()
         if not isinstance(current, TracerProvider):
             trace.set_tracer_provider(provider)
+            active = provider
+        elif extra_resource:
+            # The run identity is on THIS provider's resource; the host's provider
+            # would silently drop it.
             active = provider
         else:
             active = current
@@ -232,7 +283,9 @@ def _noop_tracer() -> Any:
 # ---------------------------------------------------------------------------
 
 
-def _resource_attrs_from_env(service_name: str, user_id: str | None) -> dict:
+def _resource_attrs_from_env(
+    service_name: str, user_id: str | None, extra_resource: dict[str, str] | None = None
+) -> dict:
     """Build the resource attribute dict for the logs pipeline.
 
     Reads OTEL_RESOURCE_ATTRIBUTES (k=v,k=v) for team.id / organization.id /
@@ -255,6 +308,7 @@ def _resource_attrs_from_env(service_name: str, user_id: str | None) -> dict:
                 attrs[k] = v
     if user_id:
         attrs["user.id"] = user_id
+    attrs.update(extra_resource or {})
     return attrs
 
 
@@ -275,6 +329,7 @@ def build_logger(
     service_name: str | None = None,
     otlp_endpoint: str | None = None,
     user_id: str | None = None,
+    extra_resource: dict[str, str] | None = None,
 ) -> Any:
     """Return an OpenTelemetry ``Logger`` for emitting dashboard log records.
 
@@ -294,20 +349,15 @@ def build_logger(
     )
     try:
         from opentelemetry._logs import get_logger, set_logger_provider
-        from opentelemetry.exporter.otlp.proto.http._log_exporter import (
-            OTLPLogExporter,
-        )
         from opentelemetry.sdk._logs import LoggerProvider
-        from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
         from opentelemetry.sdk.resources import Resource
 
-        resource = Resource.create(_resource_attrs_from_env(service_name, user_id))
+        resource = Resource.create(_resource_attrs_from_env(service_name, user_id, extra_resource))
         provider = LoggerProvider(resource=resource)
-        # OTLP HTTP logs endpoint convention is <endpoint>/v1/logs.
-        exporter = OTLPLogExporter(endpoint=otlp_endpoint.rstrip("/") + "/v1/logs")
-        provider.add_log_record_processor(BatchLogRecordProcessor(exporter))
+        provider.add_log_record_processor(_log_processor(_make_log_exporter(otlp_endpoint)))
         global _LOGGER_PROVIDER
         _LOGGER_PROVIDER = provider
+        _LOGGER_PROVIDERS.append(provider)
         # Flush on interpreter exit. The span pipeline is flushed by Hermes'
         # shutdown path, but this LoggerProvider is ours alone — without an
         # explicit flush, late-turn records (api_response / tool_result emitted

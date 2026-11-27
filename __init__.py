@@ -40,7 +40,10 @@ import logging
 import os
 import threading
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # imported lazily at call time, like the other submodules
+    from .identity import RunIdentity
 
 logger = logging.getLogger(__name__)
 
@@ -48,12 +51,22 @@ logger = logging.getLogger(__name__)
 # hook call without re-importing the SDK. Mirrors the langfuse/nemo_relay gate.
 _INIT_FAILED = object()
 _LOCK = threading.RLock()
-_EMITTER: Any | object | None = None
 
-# Parallel OTel *log-record* emitter (populates the agent-coding dashboard,
-# which is built from log events, not spans). Built once alongside the span
-# emitter; may be a no-op emitter when the logs SDK/endpoint is unavailable.
-_LOG_EMITTER: Any | object | None = None
+# Span emitter and parallel OTel *log-record* emitter (populates the agent-coding
+# dashboard, which is built from log events, not spans), one pair per run identity.
+# Identity (gateway platform, profile) is a RESOURCE attribute and a resource belongs
+# to a provider, so each distinct identity gets its own provider pair, built on first
+# use. A gateway serving Slack and Telegram holds two; a CLI holds one. The log
+# emitter may be a no-op when the logs SDK/endpoint is unavailable. A value of
+# ``_INIT_FAILED`` means building that identity's emitters failed.
+_EMITTERS: dict[RunIdentity, Any | object] = {}
+_LOG_EMITTERS: dict[RunIdentity, Any | object] = {}
+
+# session id -> the identity its run was first seen with. Hooks of one run can fire
+# on threads that do not carry the gateway's context (delegated sub-agents run on
+# worker threads), so identity is remembered per session instead of re-read.
+_SESSION_IDENTITIES: dict[str, RunIdentity] = {}
+_MAX_SESSION_IDENTITIES = 1024
 
 # One open invoke_agent context per active session, keyed by session id.
 _OPEN_TURNS_LOCK = threading.Lock()
@@ -106,10 +119,18 @@ class _Delegation:
 class _ChildLink:
     """What a sub-agent's spans need to know about the run that delegated it."""
 
-    def __init__(self, parent_span: Any, parent_session_id: str, task_index: int | None) -> None:
+    def __init__(
+        self,
+        parent_span: Any,
+        parent_session_id: str,
+        task_index: int | None,
+        identity: RunIdentity | None = None,
+    ) -> None:
         self.parent_span = parent_span
         self.parent_session_id = parent_session_id
         self.task_index = task_index
+        # The delegating run's identity, read where Hermes' context is still bound.
+        self.identity = identity
 
     def attributes(self) -> dict[str, Any]:
         attrs: dict[str, Any] = {"hermes.parent_session_id": self.parent_session_id}
@@ -132,25 +153,57 @@ def _env_bool(name: str) -> bool:
     return _env(name).lower() in {"1", "true", "yes", "on"}
 
 
-def _get_emitter() -> Any | None:
-    """Return a cached :class:`OtelGenAIEmitter`, or ``None`` if unavailable.
+def _run_identity(kwargs: dict[str, Any] | None) -> RunIdentity:
+    """The identity of the run this hook belongs to.
+
+    A sub-agent takes its delegating run's identity (its worker thread does not
+    carry the gateway's context). Any other session is read from Hermes on the
+    hook's own thread and remembered once a gateway platform is seen, so the rest
+    of the run stays on one resource even if a later hook fires elsewhere.
+    """
+    from .identity import detect_run_identity
+
+    kwargs = kwargs or {}
+    session_id = _session_id_or_active(kwargs)
+    with _LINKS_LOCK:
+        known = _SESSION_IDENTITIES.get(session_id)
+        link = _CHILD_LINKS.get(session_id)
+        parent_identity = None
+        if kwargs.get("parent_session_id"):
+            parent_identity = _SESSION_IDENTITIES.get(str(kwargs["parent_session_id"]))
+    if known is not None:
+        return known
+    inherited = (link.identity if link is not None else None) or parent_identity
+    identity = inherited if inherited is not None else detect_run_identity()
+    if inherited is not None or identity.platform:
+        with _LINKS_LOCK:
+            _SESSION_IDENTITIES[session_id] = identity
+            while len(_SESSION_IDENTITIES) > _MAX_SESSION_IDENTITIES:
+                _SESSION_IDENTITIES.pop(next(iter(_SESSION_IDENTITIES)))
+    return identity
+
+
+def _get_emitter(kwargs: dict[str, Any] | None = None) -> Any | None:
+    """Return the cached :class:`OtelGenAIEmitter` for this run, or ``None``.
 
     Activation of this plugin is controlled by the Hermes plugin system — this
     function only handles the runtime-availability gate (OTel SDK importable).
-    The result is cached: built once, then returned (or fast-``None`` on
+    Emitters are built once per run identity, then returned (or fast-``None`` on
     failure) on every subsequent call. Thread-safe via double-checked locking
     so concurrent agent sessions don't race to build two providers.
     """
-    global _EMITTER
-    if _EMITTER is _INIT_FAILED:
+    identity = _run_identity(kwargs)
+    emitter = _EMITTERS.get(identity)
+    if emitter is _INIT_FAILED:
         return None
-    if _EMITTER is not None and _EMITTER is not _INIT_FAILED:
-        return _EMITTER
+    if emitter is not None:
+        return emitter
     with _LOCK:
-        if _EMITTER is _INIT_FAILED:
+        emitter = _EMITTERS.get(identity)
+        if emitter is _INIT_FAILED:
             return None
-        if _EMITTER is not None:
-            return _EMITTER
+        if emitter is not None:
+            return emitter
         try:
             from .emitter import OtelGenAIEmitter
             from .log_emitter import OtelLogEmitter
@@ -161,14 +214,16 @@ def _get_emitter() -> Any | None:
             user_id = _env("HERMES_OTEL_USER_ID") or None
             capture = _env_bool("HERMES_OTEL_CAPTURE_CONTENT")
             agent_name = _env("HERMES_OTEL_AGENT_NAME") or "hermes"
+            extra_resource = identity.resource_attributes()
 
             tracer = build_tracer(
                 service_name=service_name,
                 otlp_endpoint=otlp_endpoint,
                 user_id=user_id,
                 capture_content=capture,
+                extra_resource=extra_resource,
             )
-            _EMITTER = OtelGenAIEmitter(
+            emitter = OtelGenAIEmitter(
                 tracer,
                 agent_name=agent_name,
                 capture_content=capture,
@@ -179,17 +234,17 @@ def _get_emitter() -> Any | None:
             # pointing the plugin at a spans-only OTLP receiver (one without
             # /v1/logs) can set HERMES_OTEL_LOGS_ENABLED=false to skip the
             # pipeline entirely: no provider, no exporter, no doomed POSTs.
-            global _LOG_EMITTER
             if _env("HERMES_OTEL_LOGS_ENABLED").lower() in {"0", "false", "no", "off"}:
-                _LOG_EMITTER = OtelLogEmitter(None)
+                _LOG_EMITTERS[identity] = OtelLogEmitter(None)
             else:
                 try:
                     otel_logger = build_logger(
                         service_name=service_name,
                         otlp_endpoint=otlp_endpoint,
                         user_id=user_id,
+                        extra_resource=extra_resource,
                     )
-                    _LOG_EMITTER = OtelLogEmitter(
+                    _LOG_EMITTERS[identity] = OtelLogEmitter(
                         otel_logger,
                         agent_name=agent_name,
                         capture_content=capture,
@@ -200,26 +255,27 @@ def _get_emitter() -> Any | None:
                         "spans still emit",
                         exc_info=True,
                     )
-                    _LOG_EMITTER = OtelLogEmitter(None)
+                    _LOG_EMITTERS[identity] = OtelLogEmitter(None)
+            _EMITTERS[identity] = emitter
         except Exception as exc:  # pragma: no cover - fail-open
             # Init failure is unexpected (bad endpoint, missing SDK piece): warn
             # so a misconfiguration is visible, but stay fail-open per the
             # observability contract — never raise out of a hook.
             logger.warning("traceverse_hermes_otel disabled: init failed: %s", exc, exc_info=True)
-            _EMITTER = _INIT_FAILED
+            _EMITTERS[identity] = _INIT_FAILED
             return None
-        return _EMITTER
+        return emitter
 
 
-def _get_log_emitter() -> Any | None:
-    """Return the cached dashboard log emitter (or ``None``).
+def _get_log_emitter(kwargs: dict[str, Any] | None = None) -> Any | None:
+    """Return this run's dashboard log emitter (or ``None``).
 
     Ensures the span emitter (and thus the log emitter) is built first; the log
     emitter is constructed inside ``_get_emitter``.
     """
-    if _get_emitter() is None:
+    if _get_emitter(kwargs) is None:
         return None
-    le = _LOG_EMITTER
+    le = _LOG_EMITTERS.get(_run_identity(kwargs))
     if le is None or le is _INIT_FAILED:
         return None
     return le
@@ -359,7 +415,7 @@ def on_session_start(**kwargs: Any) -> None:
     per session — would make it session-scoped, so per-turn eval would only
     export on a clean session end and be lost on an abrupt shutdown.
     """
-    emitter = _get_emitter()
+    emitter = _get_emitter(kwargs)
     if emitter is None:
         return
     session_id = _session_id(kwargs)
@@ -367,7 +423,7 @@ def on_session_start(**kwargs: Any) -> None:
         global _ACTIVE_SESSION_ID
         _ACTIVE_SESSION_ID = session_id
     # Dashboard log record (best-effort, never raises).
-    log_emitter = _get_log_emitter()
+    log_emitter = _get_log_emitter(kwargs)
     if log_emitter is not None:
         try:
             log_emitter.session_start(
@@ -381,7 +437,7 @@ def on_session_start(**kwargs: Any) -> None:
 
 def _end_turn(**kwargs: Any) -> None:
     """Close the ``invoke_agent`` span for a Hermes session, if open."""
-    if _get_emitter() is None:
+    if _get_emitter(kwargs) is None:
         return
     session_id = _session_id(kwargs)
     with _OPEN_TURNS_LOCK:
@@ -427,7 +483,7 @@ def on_pre_llm_call(**kwargs: Any) -> None:
     resilient to an abrupt shutdown. No-op / never raises (observability must
     not break the agent).
     """
-    emitter = _get_emitter()
+    emitter = _get_emitter(kwargs)
     if emitter is None:
         return
     session_id = _session_id_or_active(kwargs)
@@ -461,7 +517,7 @@ def on_pre_llm_call(**kwargs: Any) -> None:
     # shows tool calls and API responses but no prompts. Emitted once per turn:
     # the tool-loop-continuation guard above early-returns on later pre_llm_calls
     # of the same turn, so this line is only reached on the turn's first call.
-    log_emitter = _get_log_emitter()
+    log_emitter = _get_log_emitter(kwargs)
     if log_emitter is not None:
         try:
             log_emitter.user_prompt(
@@ -489,7 +545,7 @@ def on_transform_llm_output(**kwargs: Any) -> None:
     exports it now — so prompt+response eval runs every turn and survives an
     abrupt shutdown. No-op when no turn is open. Never raises.
     """
-    emitter = _get_emitter()
+    emitter = _get_emitter(kwargs)
     if emitter is None:
         return
     session_id = _session_id_or_active(kwargs)
@@ -544,7 +600,7 @@ def on_post_api_request(**kwargs: Any) -> None:
     summary (CanonicalUsage dict) and finish reason — exactly the per-LLM-call
     enrichment fields the GenAI ``chat`` span wants.
     """
-    emitter = _get_emitter()
+    emitter = _get_emitter(kwargs)
     if emitter is None:
         return
     try:
@@ -612,7 +668,7 @@ def on_post_api_request(**kwargs: Any) -> None:
         logger.debug("on_post_api_request: failed to emit chat span", exc_info=True)
         return
     # Dashboard log record (best-effort).
-    log_emitter = _get_log_emitter()
+    log_emitter = _get_log_emitter(kwargs)
     if log_emitter is not None:
         try:
             log_emitter.api_response(
@@ -634,7 +690,7 @@ def on_post_api_request(**kwargs: Any) -> None:
 
 def on_post_tool_call(**kwargs: Any) -> None:
     """Emit an ``execute_tool`` span for a completed tool call."""
-    emitter = _get_emitter()
+    emitter = _get_emitter(kwargs)
     if emitter is None:
         return
     try:
@@ -668,7 +724,7 @@ def on_post_tool_call(**kwargs: Any) -> None:
         logger.debug("on_post_tool_call: failed to emit execute_tool span", exc_info=True)
         return
     # Dashboard log record (best-effort).
-    log_emitter = _get_log_emitter()
+    log_emitter = _get_log_emitter(kwargs)
     if log_emitter is not None:
         try:
             log_emitter.tool_result(
@@ -712,7 +768,7 @@ def on_pre_tool_call(**kwargs: Any) -> None:
     """
     if kwargs.get("tool_name") != DELEGATE_TOOL:
         return
-    emitter = _get_emitter()
+    emitter = _get_emitter(kwargs)
     if emitter is None:
         return
     try:
@@ -739,7 +795,7 @@ def on_subagent_start(**kwargs: Any) -> None:
     child's session id to the parent's delegate_task span. Ids only, so this
     runs whether or not content capture is on.
     """
-    if _get_emitter() is None:
+    if _get_emitter(kwargs) is None:
         return
     try:
         child_session_id = kwargs.get("child_session_id")
@@ -747,6 +803,7 @@ def on_subagent_start(**kwargs: Any) -> None:
             return
         child_session_id = str(child_session_id)
         parent_session_id = str(kwargs.get("parent_session_id") or "")
+        identity = _run_identity({"session_id": parent_session_id} if parent_session_id else None)
         child_ids: list[str] = []
         task_index = None
         with _LINKS_LOCK:
@@ -757,11 +814,13 @@ def on_subagent_start(**kwargs: Any) -> None:
                 child_ids = list(delegation.child_session_ids)
         if delegation is not None:
             delegation.span.set_attribute("hermes.delegation.child_session_ids", child_ids)
-            link = _ChildLink(delegation.span, parent_session_id, task_index)
+            link = _ChildLink(delegation.span, parent_session_id, task_index, identity)
         else:
             # No open delegate_task span (another plugin vetoed the call, or the
             # child was spawned outside the tool): parent on the delegating turn.
-            link = _ChildLink(_open_turn_span({"session_id": parent_session_id}), parent_session_id, None)
+            link = _ChildLink(
+                _open_turn_span({"session_id": parent_session_id}), parent_session_id, None, identity
+            )
         _remember_child(child_session_id, link)
     except Exception:
         logger.debug("on_subagent_start: failed to link sub-agent", exc_info=True)
@@ -801,10 +860,10 @@ def register(ctx) -> None:
 
 def reset_for_tests() -> None:
     """Drop the cached emitter and any open turns (tests/teardown only)."""
-    global _EMITTER, _LOG_EMITTER, _ACTIVE_SESSION_ID
+    global _ACTIVE_SESSION_ID
     with _LOCK:
-        _EMITTER = None
-        _LOG_EMITTER = None
+        _EMITTERS.clear()
+        _LOG_EMITTERS.clear()
     with _OPEN_TURNS_LOCK:
         _OPEN_TURNS.clear()
         _OPEN_TURN_SPANS.clear()
@@ -812,5 +871,6 @@ def reset_for_tests() -> None:
         _DELEGATIONS.clear()
         _LATEST_DELEGATION.clear()
         _CHILD_LINKS.clear()
+        _SESSION_IDENTITIES.clear()
     with _ACTIVE_SESSION_LOCK:
         _ACTIVE_SESSION_ID = "default"

@@ -158,6 +158,19 @@ content, so it is emitted with content capture off):
 | `hermes.delegation.task_index` | every span of a sub-agent | its index in `delegate_task`'s `tasks` |
 | `hermes.delegation.child_session_ids` | the parent's `delegate_task` span | the sub-agents' session ids |
 
+**Gateway bot and profile (since v2.2.0).** Two attributes on the OTel
+**resource** of everything the plugin emits, spans and log records, sub-agents
+included, so a backend can tell a Hermes messaging-gateway bot from a CLI session:
+
+| Attribute | Present | Value |
+|---|---|---|
+| `hermes.gateway.platform` | only on runs driven by the messaging gateway | the platform, e.g. `slack`, `telegram`, `discord` |
+| `hermes.bot.profile` | whenever the profile name is known | the Hermes profile, e.g. `default`, `ops-bot` |
+
+A CLI session on the same profile has `hermes.bot.profile` but no
+`hermes.gateway.platform`. A profile whose home Hermes cannot name (`custom`) is
+left out rather than guessed.
+
 `gen_ai.system = hermes` on every span; `service.name` defaults to
 `agent.coding.hermes`. Spans and dashboard log records are emitted in parallel
 (a logs failure never disables spans). Identity (`service.name`, `user.id`, and
@@ -233,7 +246,7 @@ key_attributes:
   - gen_ai.system                # always "hermes"
   - gen_ai.request.model / gen_ai.response.model
   - gen_ai.usage.input_tokens / gen_ai.usage.output_tokens
-  - gen_ai.usage.cache_read.input_tokens / gen_ai.usage.cache_creation.input_tokens  # prompt-cache buckets, when the provider reports them
+  - gen_ai.usage.cache_read.input_tokens / gen_ai.usage.cache_creation.input_tokens  # prompt-cache buckets, when the provider reports them; for Anthropic-style usage input_tokens EXCLUDES these, so total prompt tokens = input + cache_read + cache_creation
   - gen_ai.response.finish_reasons   # array; [0] is the primary reason
   - gen_ai.tool.name / gen_ai.tool.type
   - cost_usd                     # real or size-tier-estimated for local models

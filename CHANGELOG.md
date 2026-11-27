@@ -7,13 +7,22 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **A scheduled run that reports to a chat channel is a bot run.** A Hermes cron run binds no session platform, so
+  until now it never carried `hermes.gateway.platform`. When the run is a cron run (`HERMES_CRON_SESSION`) and its
+  job delivers to a messaging platform (`HERMES_CRON_AUTO_DELIVER_PLATFORM`, for example `slack`), the resource now
+  carries `hermes.gateway.platform` = that platform and a new `hermes.run.trigger` = `cron`, sub-agents included.
+  A cron job that delivers locally or to a webhook stays as before, with neither attribute.
 - Prompt-cache token buckets. `chat` spans carry
   `gen_ai.usage.cache_read.input_tokens` and
   `gen_ai.usage.cache_creation.input_tokens`, and `api_response` records carry
   `cache_read_tokens` / `cache_creation_tokens` (Claude Code's names). Read from
   Hermes' normalized usage (`cache_read_tokens` / `cache_write_tokens`) or raw
   Anthropic usage. Before this, cache-heavy Anthropic sessions reported only the
-  uncached `input_tokens`, so input looked near zero.
+  uncached `input_tokens`, so input looked near zero. For Anthropic-style usage
+  `gen_ai.usage.input_tokens` excludes the cache buckets, which are reported
+  separately as `gen_ai.usage.cache_read.input_tokens` and
+  `gen_ai.usage.cache_creation.input_tokens`; total prompt tokens is the sum of
+  the three.
 
 ### Fixed
 - Response text was never captured on Hermes v0.22+. `post_api_request` now
@@ -24,9 +33,48 @@ All notable changes to this project are documented here. The format follows
 - Tool error text no longer leaves the process when content capture is off.
   `tool_result` records keep `status_code` and `error_type` but only carry
   `error` when `HERMES_OTEL_CAPTURE_CONTENT` is true. `execute_tool` spans set
-  `error.type` to the exception class (or `ToolError` for string errors) and only
-  record the exception event / `error.message` when capture is on. Error text
+  `error.type` to the exception class (or the error string itself, such as the
+  short status a failed delegated task passes) and only record the exception
+  event / `error.message` when capture is on. Error text
   often quotes tool input or output (paths, file contents, API responses).
+
+## [2.2.1] - 2026-11-24
+
+### Fixed
+- **The plugin can be enabled in several Hermes profiles at once.** Hermes builds one shared uv workspace for every
+  profile's plugins and keeps a buildable plugin's declared name, so the same plugin in two profiles failed `uv lock`
+  ("two workspace members are both named `hermes-otel-plugin`") and Hermes disabled it in every profile, while a
+  plugin with no build system is renamed per profile. `pyproject.toml` no longer declares `[build-system]`.
+  `pip install git+https://github.com/Mandark-droid/hermes-otel-plugin.git` and `python -m build` still work: they
+  fall back to setuptools (PEP 517), and the wheel keeps the `hermes_agent.plugins` entry point.
+
+## [2.2.0] - 2026-11-24
+
+### Added
+- **Gateway bot runs are told apart from CLI runs.** Two resource attributes, on
+  every span and every log record of a run, sub-agents included:
+  `hermes.gateway.platform` (`slack`, `telegram`, `discord`, ...) is present only
+  when the messaging gateway drives the run, and `hermes.bot.profile` is the Hermes
+  profile name whenever it is known. A CLI session never carries a platform, even
+  on the same profile. Both are read from Hermes itself (the gateway's
+  `HERMES_SESSION_PLATFORM` / `HERMES_SESSION_PROFILE` session variables, then the
+  profile derived from the Hermes home), not from a process name.
+- Only a human chat channel counts as a gateway run. A turn on a non-messaging surface (`local`, `api_server`,
+  `webhook`, `desktop`, `tui`, `cli`, ...) carries no `hermes.gateway.platform`, even though the gateway process
+  serves it: a `hermes chat` turn is not a bot conversation. The set is Hermes' own
+  `NON_MESSAGING_SESSION_SURFACES`, with a copy as fallback.
+- A sub-agent takes its delegating run's identity, read on the delegating thread,
+  because Hermes runs sub-agents on worker threads that do not carry the gateway's
+  context.
+
+### Changed
+- The plugin builds one tracer and logger provider per run identity (gateway
+  platform, profile), on first use, because a resource belongs to a provider. A CLI
+  process still builds one pair; a gateway serving two platforms builds two.
+- A run that carries a gateway platform uses the plain OpenTelemetry SDK provider
+  even when `genai-otel-instrument` is installed, since that library owns one
+  process-wide resource. A profile alone still goes through it.
+- `provider.build_tracer` / `build_logger` accept `extra_resource`.
 
 ## [2.1.0] - 2026-11-18
 

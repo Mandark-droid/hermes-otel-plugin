@@ -226,7 +226,7 @@ class TestEmitter:
         )
 
         attrs = _by_name(exporter.get_finished_spans())[OP_EXECUTE_TOOL].attributes
-        assert attrs["error.type"] == "ToolError"
+        assert attrs["error.type"] == "exit 1: boom"
         assert attrs["error.message"] == "exit 1: boom"
 
     def test_content_not_captured_by_default(self, exporter_and_tracer):
@@ -812,8 +812,9 @@ class TestPluginAdapter:
         ctx.hooks["post_tool_call"](tool_name="terminal", status="error")
 
         spans = _by_name(exporter.get_finished_spans())
-        # String errors map to a low-cardinality class; the text is content.
-        assert spans[OP_EXECUTE_TOOL].attributes["error.type"] == "ToolError"
+        # A string error is recorded as error.type (a delegated task passes a
+        # short status string); only error.message is content-gated.
+        assert spans[OP_EXECUTE_TOOL].attributes["error.type"] == "error"
 
     def test_post_api_request_reads_response_from_assistant_message(
         self, exporter_and_tracer, monkeypatch
@@ -1198,3 +1199,231 @@ class TestSubagentLinkage:
         hooks["on_session_end"](session_id="p")  # interrupted: post_tool_call never fires
         _spans, _invokes, delegate = _spans_of(exporter)
         assert len(delegate) == 1
+
+
+# ---------------------------------------------------------------------------
+# Run identity: gateway platform + profile on the RESOURCE of everything emitted
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def hermes_identity(monkeypatch):
+    """Fake the two Hermes modules the plugin reads, with a mutable identity.
+
+    ``state["platform"]`` / ``state["session_profile"]`` stand for the gateway's
+    session variables, ``state["home_profile"]`` for the name derived from HERMES_HOME.
+    """
+    import types
+
+    state = {"platform": "", "session_profile": "", "home_profile": "default", "cron": "", "cron_deliver": ""}
+    session_vars = {
+        "HERMES_SESSION_PLATFORM": "platform",
+        "HERMES_SESSION_PROFILE": "session_profile",
+        "HERMES_CRON_SESSION": "cron",
+        "HERMES_CRON_AUTO_DELIVER_PLATFORM": "cron_deliver",
+    }
+    gateway = types.ModuleType("gateway")
+    session_context = types.ModuleType("gateway.session_context")
+    session_context.get_session_env = lambda name, default="": state[session_vars[name]] or default
+    cli = types.ModuleType("hermes_cli")
+    profiles = types.ModuleType("hermes_cli.profiles")
+    profiles.get_active_profile_name = lambda: state["home_profile"]
+    for name, module in (
+        ("gateway", gateway),
+        ("gateway.session_context", session_context),
+        ("hermes_cli", cli),
+        ("hermes_cli.profiles", profiles),
+    ):
+        monkeypatch.setitem(sys.modules, name, module)
+    return state
+
+
+def _real_pipelines(monkeypatch):
+    """Run the plugin's own provider code (so the resource is the real one) into memory."""
+    plugin, provider = _fresh_plugin()
+    span_exporter = InMemorySpanExporter()
+    log_exporter = InMemoryLogRecordExporter()
+    monkeypatch.setattr(provider, "_try_genai_otel", lambda **_: None)
+    monkeypatch.setattr(provider, "_make_span_exporter", lambda endpoint: span_exporter)
+    monkeypatch.setattr(provider, "_make_log_exporter", lambda endpoint: log_exporter)
+    monkeypatch.setattr(provider, "_span_processor", SimpleSpanProcessor)
+    monkeypatch.setattr(provider, "_log_processor", SimpleLogRecordProcessor)
+    monkeypatch.setenv("OTEL_RESOURCE_ATTRIBUTES", "")
+    # OTel allows one global provider per process; pretend none is set so the plugin
+    # keeps using the provider it builds, as it does in a fresh Hermes process.
+    from opentelemetry import trace
+
+    monkeypatch.setattr(trace, "get_tracer_provider", lambda: object())
+    ctx = _FakeCtx()
+    plugin.register(ctx)
+    return ctx.hooks, span_exporter, log_exporter
+
+
+def _span_resources(exporter):
+    return [dict(s.resource.attributes) for s in exporter.get_finished_spans()]
+
+
+def _record_resource(record):
+    """Resource of a finished log record (its home moved between SDK releases)."""
+    resource = getattr(record, "resource", None) or getattr(record.log_record, "resource", None)
+    return dict(resource.attributes)
+
+
+def _log_resources(exporter):
+    return [_record_resource(r) for r in exporter.get_finished_logs()]
+
+
+class TestRunIdentity:
+    def test_gateway_run_stamps_platform_and_profile(self, hermes_identity, monkeypatch):
+        monkeypatch.delenv("HERMES_OTEL_CAPTURE_CONTENT", raising=False)
+        hermes_identity.update(platform="slack", home_profile="founder-bot")
+        hooks, spans, logs = _real_pipelines(monkeypatch)
+
+        _delegate(hooks, children=["child-a", "child-b"])
+
+        finished = spans.get_finished_spans()
+        assert any(s.name.startswith("chat") for s in finished)
+        assert any(s.name.startswith("execute_tool") for s in finished)
+        invokes = [s for s in finished if s.name == OP_INVOKE_AGENT]
+        root = next(s for s in invokes if s.attributes["session.id"] == "parent")
+        child_spans = [s for s in finished if s.parent is not None]
+        sub_agent = next(s for s in invokes if s.attributes["session.id"] == "child-a")
+        assert root.parent is None and child_spans and sub_agent.parent is not None
+
+        expected = {"hermes.gateway.platform": "slack", "hermes.bot.profile": "founder-bot"}
+        for span in finished:  # root, chat/tool children and both sub-agents
+            for key, value in expected.items():
+                assert span.resource.attributes.get(key) == value, (span.name, key)
+        # span attributes stay untouched: identity lives on the resource only
+        assert "hermes.gateway.platform" not in root.attributes
+        # log records of the run, including the sub-agents' own
+        records = logs.get_finished_logs()
+        assert records
+        for record in records:
+            for key, value in expected.items():
+                assert _record_resource(record).get(key) == value, key
+        # the sub-agents' own log records are among them
+        child_logs = [r for r in records if "child-a" in str(r.log_record.attributes.get("session.id", ""))]
+        assert child_logs
+
+    def test_cli_run_has_no_gateway_platform(self, hermes_identity, monkeypatch):
+        monkeypatch.delenv("HERMES_OTEL_CAPTURE_CONTENT", raising=False)
+        # Same profile as the gateway test, but no gateway bound: a CLI session.
+        hermes_identity.update(platform="", home_profile="founder-bot")
+        hooks, spans, logs = _real_pipelines(monkeypatch)
+
+        _delegate(hooks, children=["child-a", "child-b"])
+
+        resources = _span_resources(spans) + _log_resources(logs)
+        assert resources
+        for resource in resources:
+            assert "hermes.gateway.platform" not in resource
+            assert resource["hermes.bot.profile"] == "founder-bot"
+
+    @pytest.mark.parametrize("surface", ["local", "api_server", "webhook", "desktop", "tui", "cli"])
+    def test_non_messaging_surface_is_not_a_gateway_run(self, hermes_identity, monkeypatch, surface):
+        # A `hermes chat` turn runs inside the gateway process but on a non-messaging surface: not a bot.
+        monkeypatch.delenv("HERMES_OTEL_CAPTURE_CONTENT", raising=False)
+        hermes_identity.update(platform=surface, home_profile="founder-bot")
+        hooks, spans, logs = _real_pipelines(monkeypatch)
+
+        _delegate(hooks, children=["child-a", "child-b"])
+
+        resources = _span_resources(spans) + _log_resources(logs)
+        assert resources
+        for resource in resources:
+            assert "hermes.gateway.platform" not in resource
+
+    def test_hermes_own_non_messaging_set_wins(self, hermes_identity, monkeypatch):
+        import sys as _sys
+
+        from identity import detect_run_identity
+
+        _sys.modules["gateway.session_context"].NON_MESSAGING_SESSION_SURFACES = frozenset({"", "matrix"})
+        hermes_identity.update(platform="matrix")
+        assert detect_run_identity().platform is None
+        hermes_identity.update(platform="local")  # not in Hermes' (hypothetical) set, so it counts
+        assert detect_run_identity().platform == "local"
+
+    def test_one_process_serving_two_platforms_keeps_each_run_apart(self, hermes_identity, monkeypatch):
+        hooks, spans, _logs = _real_pipelines(monkeypatch)
+        for sid, platform in (("s-slack", "slack"), ("s-tg", "telegram")):
+            hermes_identity["platform"] = platform
+            hooks["pre_llm_call"](session_id=sid, user_message="hi", model="m")
+            hooks["transform_llm_output"](session_id=sid, response_text="yo")
+            hooks["on_session_end"](session_id=sid)
+        by_session = {
+            s.attributes["session.id"]: s.resource.attributes["hermes.gateway.platform"]
+            for s in spans.get_finished_spans()
+            if s.name == OP_INVOKE_AGENT
+        }
+        assert by_session == {"s-slack": "slack", "s-tg": "telegram"}
+
+    def test_unnamed_profile_is_omitted(self, hermes_identity, monkeypatch):
+        hermes_identity.update(platform="", home_profile="custom")
+        hooks, spans, _logs = _real_pipelines(monkeypatch)
+        hooks["pre_llm_call"](session_id="s", user_message="hi", model="m")
+        hooks["transform_llm_output"](session_id="s", response_text="yo")
+        for resource in _span_resources(spans):
+            assert "hermes.bot.profile" not in resource
+
+    def test_session_profile_wins_over_home_profile(self, hermes_identity, monkeypatch):
+        hermes_identity.update(platform="slack", session_profile="ops-bot", home_profile="default")
+        hooks, spans, _logs = _real_pipelines(monkeypatch)
+        hooks["pre_llm_call"](session_id="s", user_message="hi", model="m")
+        hooks["transform_llm_output"](session_id="s", response_text="yo")
+        assert {r["hermes.bot.profile"] for r in _span_resources(spans)} == {"ops-bot"}
+
+    def test_outside_hermes_nothing_is_stamped_and_nothing_breaks(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "gateway", None)  # import raises ImportError
+        monkeypatch.setitem(sys.modules, "gateway.session_context", None)
+        monkeypatch.setitem(sys.modules, "hermes_cli", None)
+        monkeypatch.setitem(sys.modules, "hermes_cli.profiles", None)
+        hooks, spans, _logs = _real_pipelines(monkeypatch)
+        hooks["pre_llm_call"](session_id="s", user_message="hi", model="m")
+        hooks["transform_llm_output"](session_id="s", response_text="yo")
+        resources = _span_resources(spans)
+        assert resources
+        for resource in resources:
+            assert "hermes.gateway.platform" not in resource and "hermes.bot.profile" not in resource
+
+
+class TestCronRunIdentity:
+    """A scheduled (cron) run that delivers to a chat platform is a bot run (2.3.0)."""
+
+    def test_cron_run_delivering_to_slack_is_bot(self, hermes_identity, monkeypatch):
+        monkeypatch.delenv("HERMES_OTEL_CAPTURE_CONTENT", raising=False)
+        hermes_identity.update(cron="1", cron_deliver="slack", home_profile="scout-bot")
+        hooks, spans, logs = _real_pipelines(monkeypatch)
+
+        _delegate(hooks, children=["child-a", "child-b"])
+
+        resources = _span_resources(spans) + _log_resources(logs)
+        assert resources
+        for resource in resources:
+            assert resource["hermes.gateway.platform"] == "slack"
+            assert resource["hermes.run.trigger"] == "cron"
+            assert resource["hermes.bot.profile"] == "scout-bot"
+
+    @pytest.mark.parametrize("deliver", ["", "local", "webhook"])
+    def test_cron_run_without_chat_delivery_is_not_bot(self, hermes_identity, deliver):
+        from identity import detect_run_identity
+
+        hermes_identity.update(cron="1", cron_deliver=deliver)
+        ident = detect_run_identity()
+        assert ident.platform is None
+        assert "hermes.run.trigger" not in ident.resource_attributes()
+
+    def test_chat_turn_unchanged(self, hermes_identity):
+        from identity import detect_run_identity
+
+        hermes_identity.update(platform="slack")
+        attrs = detect_run_identity().resource_attributes()
+        assert attrs["hermes.gateway.platform"] == "slack"
+        assert "hermes.run.trigger" not in attrs
+
+    def test_delivery_platform_without_cron_session_ignored(self, hermes_identity):
+        from identity import detect_run_identity
+
+        hermes_identity.update(cron="", cron_deliver="slack")
+        assert detect_run_identity().platform is None

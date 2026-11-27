@@ -34,7 +34,9 @@ GenAI attribute conventions emitted (the names the OTel GenAI spec defines):
     gen_ai.request.model             model id requested
     gen_ai.response.model            model id that answered
     gen_ai.response.finish_reasons   [str]  (stop / length / tool_calls / ...)
-    gen_ai.usage.input_tokens        int
+    gen_ai.usage.input_tokens        int  (Anthropic-style: excludes the cache buckets)
+    gen_ai.usage.cache_read.input_tokens      int  (cache buckets, reported separately)
+    gen_ai.usage.cache_creation.input_tokens  int
     gen_ai.usage.output_tokens       int
     gen_ai.tool.name                 tool name (execute_tool span)
     gen_ai.tool.type                 function | extension
@@ -312,16 +314,18 @@ class OtelGenAIEmitter:
     def _record_error(
         span: Any, error: BaseException | str, *, capture_content: bool = False
     ) -> None:
-        # The exception message / error string often quotes tool input or
-        # output, so only the error class is recorded unless content capture
-        # is on.
+        # The exception message / error text often quotes tool input or
+        # output, so only the exception class (or the short status string a
+        # failed delegated task passes) is recorded as ``error.type``; the
+        # text itself (exception event / ``error.message``) needs content
+        # capture.
         try:
             if isinstance(error, BaseException):
                 span.set_attribute("error.type", type(error).__name__)
                 if capture_content:
                     span.record_exception(error)
             else:
-                span.set_attribute("error.type", "ToolError")
+                span.set_attribute("error.type", str(error))
                 if capture_content:
                     span.set_attribute("error.message", str(error))
         except Exception:  # pragma: no cover - defensive
