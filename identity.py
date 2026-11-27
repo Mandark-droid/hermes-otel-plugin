@@ -42,7 +42,9 @@ _NON_MESSAGING_FALLBACK = frozenset({
 
 def _non_messaging_surfaces() -> frozenset[str]:
     try:
-        from gateway.session_context import NON_MESSAGING_SESSION_SURFACES  # type: ignore[import-not-found]
+        from gateway.session_context import (  # type: ignore[import-not-found]
+            NON_MESSAGING_SESSION_SURFACES,
+        )
 
         return frozenset(NON_MESSAGING_SESSION_SURFACES)
     except Exception:
@@ -92,7 +94,9 @@ def detect_run_identity() -> RunIdentity:
     profile = session_profile or None
     if profile is None:
         try:
-            from hermes_cli.profiles import get_active_profile_name  # type: ignore[import-not-found]
+            from hermes_cli.profiles import (  # type: ignore[import-not-found]
+                get_active_profile_name,
+            )
 
             name = str(get_active_profile_name() or "").strip()
             profile = None if name in ("", _UNNAMED_PROFILE) else name
